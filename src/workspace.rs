@@ -102,6 +102,8 @@ pub(crate) struct Settings {
     pub(crate) lang: Lang,
     pub(crate) ceiling: Duration,
     pub(crate) max_children: usize,
+    /// The directory the client's `initialize` named.
+    pub(crate) session_root: PathBuf,
 }
 
 /// `FLEET_LSP_MAX_CHILDREN`, validated: the cap, and a note for the log
@@ -154,6 +156,8 @@ struct Workspace {
     last_log: HashMap<PathBuf, String>,
     documents: Documents,
     recent: Recent<PathBuf>,
+    /// Why `recent` points where it does, named in the log.
+    recent_reason: &'static str,
     /// Client request id → the slot it went to, for `$/cancelRequest`.
     client_ids: HashMap<Id, u64>,
     next_slot: u64,
@@ -185,6 +189,7 @@ impl Workspace {
             last_log: HashMap::new(),
             documents: Documents::default(),
             recent: Recent::default(),
+            recent_reason: "most recently used",
             client_ids: HashMap::new(),
             next_slot: 1,
             next_own: 1,
@@ -306,6 +311,26 @@ impl Workspace {
             id,
             &core::capabilities("fleet-lsp (workspace)"),
         ));
+        self.warm_start();
+    }
+
+    /// The session root's project starts at once and seeds `recent`. A
+    /// failure is logged; the cached refusal answers later requests.
+    fn warm_start(&mut self) {
+        let dir = self.settings.session_root.clone();
+        let Ok(root) = self.root_of_dir(&dir) else {
+            return;
+        };
+        match self.slot_for(&root) {
+            Ok(_) => {
+                self.recent.touch(&root);
+                self.recent_reason = "the session repository";
+                self.log.line(&format!("first project {}", tilde(&root)));
+            }
+            Err(text) => self
+                .log
+                .line(&format!("warm start of {} failed: {text}", tilde(&root))),
+        }
     }
 
     fn request(&mut self, body: Vec<u8>, id: Option<&Id>) {
@@ -316,9 +341,10 @@ impl Workspace {
                 let latest = self.recent.latest().cloned();
                 if let Some(root) = &latest {
                     self.log.line(&format!(
-                        "{} → {} (most recently used)",
+                        "{} → {} ({})",
                         scan(&body).method.unwrap_or_default(),
-                        tilde(root)
+                        tilde(root),
+                        self.recent_reason
                     ));
                 }
                 latest.ok_or_else(|| refusal::no_document(self.lang()))
@@ -327,6 +353,7 @@ impl Workspace {
         let slot = root.and_then(|root| {
             let slot = self.slot_for(&root)?;
             self.recent.touch(&root);
+            self.recent_reason = "most recently used";
             Ok(slot)
         });
         match slot {
@@ -356,6 +383,10 @@ impl Workspace {
             return;
         };
         let Ok(root) = self.root_of(&uri) else { return };
+        if method == "textDocument/didOpen" {
+            self.recent.touch(&root);
+            self.recent_reason = "most recently opened";
+        }
         let live = self
             .serving
             .get(&root)
@@ -477,15 +508,25 @@ impl Workspace {
             return Err(refusal::no_repository(lang, uri));
         };
         let dir = path.parent().unwrap_or(&path).to_path_buf();
+        self.root_of_dir_for(&dir, &path)
+    }
+
+    /// The project root of a directory itself (the session root).
+    fn root_of_dir(&mut self, dir: &Path) -> Result<PathBuf, String> {
+        self.root_of_dir_for(dir, dir)
+    }
+
+    fn root_of_dir_for(&mut self, dir: &Path, path: &Path) -> Result<PathBuf, String> {
+        let lang = self.lang();
         let settings_lang = self.settings.lang;
         let located = self
             .located
-            .entry(dir.clone())
-            .or_insert_with(|| resolve::locate(settings_lang, &dir))
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| resolve::locate(settings_lang, dir))
             .clone();
         match located {
             Located::Project { project_root, .. } => Ok(project_root),
-            Located::NoRepository => Err(refusal::no_repository(lang, &tilde(&path))),
+            Located::NoRepository => Err(refusal::no_repository(lang, &tilde(path))),
             Located::Several { git_root, projects } => {
                 Err(refusal::several(lang, &tilde(&git_root), &projects))
             }

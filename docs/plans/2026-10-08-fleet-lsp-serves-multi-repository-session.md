@@ -344,3 +344,6 @@ binary. 0.5.0's binaries exist, but its plugin never shipped.
 The live run is what found the missing Cargo workspace lift.
 
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,language-rust,tui,unix body-sha=733a175da239 -->
+- 2026-10-15: the non-goal "no change for a session inside a repository" is
+  reversed by docs/plans/2026-10-15-route-every-session-by-file.md: every
+  session runs workspace mode; `FLEET_LSP_MODE=single` restores one server.

@@ -78,13 +78,18 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         log.line(&note);
     }
     let refusal = version_refusal(min_version);
-    if refusal.is_none() && resolve::git_root(&session_root).is_none() {
+    let in_repo = resolve::git_root(&session_root).is_some();
+    let (single, mode_note) = mode_from_env(in_repo);
+    if let Some(note) = mode_note {
+        log.line(&note);
+    }
+    if refusal.is_none() && !single {
         let (max_children, note) = crate::workspace::max_children_from_env();
         if let Some(note) = note {
             log.line(&note);
         }
         log.line(&format!(
-            "fleet-lsp {} serve {lang}: session root {}; workspace mode: no git repository here, one server per project used (at most {max_children}); ceiling {}s",
+            "fleet-lsp {} serve {lang}: session root {}; workspace mode (default; FLEET_LSP_MODE=single restores one server), one server per project used (at most {max_children}); ceiling {}s",
             env!("CARGO_PKG_VERSION"),
             tilde(&session_root),
             ceiling.as_secs()
@@ -93,6 +98,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
             lang,
             ceiling,
             max_children,
+            session_root,
         };
         return crate::workspace::serve(settings, log, client, first);
     }
@@ -584,6 +590,28 @@ pub(crate) fn file_uri_path(uri: &str) -> Option<PathBuf> {
         }
     }
     Some(PathBuf::from(String::from_utf8(out).ok()?))
+}
+
+/// `FLEET_LSP_MODE`: whether single-root mode is chosen, and a note for the
+/// log when the value was not usable or `single` could not apply.
+fn mode_from_env(in_repo: bool) -> (bool, Option<String>) {
+    match std::env::var("FLEET_LSP_MODE") {
+        Err(_) => (false, None),
+        Ok(v) => match v.trim() {
+            "workspace" => (false, None),
+            "single" if in_repo => (true, None),
+            "single" => (
+                false,
+                Some("FLEET_LSP_MODE=single but no git repository at the session root; using workspace".into()),
+            ),
+            _ => (
+                false,
+                Some(format!(
+                    "FLEET_LSP_MODE={v:?} is not single|workspace; using workspace"
+                )),
+            ),
+        },
+    }
 }
 
 pub(crate) fn ceiling_from_env() -> (Duration, Option<String>) {
