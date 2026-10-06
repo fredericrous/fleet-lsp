@@ -1,0 +1,42 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  deps:
+    # First, and on its own: the no-dependency rule is the one that is easiest
+    # to break by accident and cheapest to check.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-no-deps.sh
+
+  rust:
+    # Both platforms the tap ships: the relay is pipes, threads and child
+    # processes, where macOS and Linux differ in the details that bite.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  msrv:
+    # A `rust-version` nobody compiles against is a comment with syntax.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: read the declared floor
+        id: msrv
+        run: echo "v=$(grep '^rust-version' Cargo.toml | head -1 | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - run: rustup toolchain install ${{ steps.msrv.outputs.v }} --profile minimal
+      - run: cargo +${{ steps.msrv.outputs.v }} build
