@@ -147,8 +147,6 @@ struct Shell {
     outbox_child: VecDeque<Vec<u8>>,
     outbox_client: VecDeque<Vec<u8>>,
     outbox_client_bytes: usize,
-    /// Since when fleet-lsp's own replies could not enter the reserved share.
-    outbox_client_since: Option<Instant>,
     pending_client: usize,
     child_stdout_closed: bool,
     exit: Option<u8>,
@@ -171,7 +169,6 @@ impl Shell {
             outbox_child: VecDeque::new(),
             outbox_client: VecDeque::new(),
             outbox_client_bytes: 0,
-            outbox_client_since: None,
             pending_client: 0,
             child_stdout_closed: false,
             exit: None,
@@ -231,12 +228,12 @@ impl Shell {
         if child_stuck && self.exit.is_none() {
             self.step(Input::ChildHung);
         }
-        // The reserved share being full counts as the client not reading.
-        let own_stuck = self
-            .outbox_client_since
-            .is_some_and(|t| now.saturating_duration_since(t) >= HUNG)
-            || self.outbox_client_bytes > QUEUE_CAP;
-        let client_stuck = own_stuck || self.client_out.stalled_for(now).is_some_and(|d| d >= HUNG);
+        // The client is not reading when no byte has reached it for `HUNG`
+        // (the queue's clock counts every chunk written, so a slow reader of
+        // one large frame is still reading). Replies of our own piling up
+        // past the queue cap behind a full reserved share are the same case.
+        let client_stuck = self.outbox_client_bytes > QUEUE_CAP
+            || self.client_out.stalled_for(now).is_some_and(|d| d >= HUNG);
         if client_stuck && self.exit.is_none() {
             self.log.line("the client stopped reading its input");
             self.step(Input::ClientGone);
@@ -279,11 +276,6 @@ impl Shell {
             }
             self.outbox_client_bytes -= len;
         }
-        self.outbox_client_since = match (self.outbox_client.is_empty(), self.outbox_client_since) {
-            (true, _) => None,
-            (false, None) => Some(Instant::now()),
-            (false, since) => since,
-        };
     }
 
     fn teardown(&mut self, code: u8) -> u8 {

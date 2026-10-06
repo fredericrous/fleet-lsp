@@ -14,6 +14,15 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_fleet-lsp");
 
+/// The tests that move tens of MiB through a Python fake are CPU-bound;
+/// run concurrently they starve each other and the light tests on a small
+/// runner. They take this lock, so they run one at a time.
+static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    HEAVY.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 struct Fixture {
     dir: PathBuf,
 }
@@ -247,7 +256,7 @@ impl Session {
             r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"rootUri":"file://{}","capabilities":{{"window":{{"workDoneProgress":true}}}}}}}}"#,
             root.display()
         ));
-        self.recv_until(Duration::from_secs(10), |b| b.contains(r#""id":0"#))
+        self.recv_until(Duration::from_secs(30), |b| b.contains(r#""id":0"#))
             .expect("initialize answered");
         self.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
     }
@@ -532,6 +541,7 @@ fn a_newer_plugin_gets_the_upgrade_refusal() {
 
 #[test]
 fn a_server_that_stops_reading_is_torn_down_after_30s() {
+    let _heavy = heavy();
     let fx = Fixture::new("noread", true);
     let mut s = Session::start(&fx, &[("FAKE_STOP_READING", "1")], true);
     s.initialize(&fx.dir);
@@ -563,6 +573,7 @@ fn a_server_that_stops_reading_is_torn_down_after_30s() {
 
 #[test]
 fn a_client_that_stops_reading_is_torn_down_after_30s() {
+    let _heavy = heavy();
     let fx = Fixture::new("noclient", true);
     let mut s = Session::start(&fx, &[("FAKE_FLOOD_MIB", "64")], false);
     s.send(&format!(
@@ -583,6 +594,7 @@ fn a_client_that_stops_reading_is_torn_down_after_30s() {
 
 #[test]
 fn a_slow_but_reading_server_keeps_its_output_flowing() {
+    let _heavy = heavy();
     let fx = Fixture::new("slow", true);
     let mut s = Session::start(
         &fx,
@@ -657,6 +669,7 @@ fn rss_kib(pid: u32) -> u64 {
 
 #[test]
 fn sustained_traffic_while_closed_overloads_without_losing_notifications() {
+    let _heavy = heavy();
     let fx = Fixture::new("overload", true);
     let mut s = Session::start(
         &fx,
