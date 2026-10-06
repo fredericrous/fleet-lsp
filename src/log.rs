@@ -32,12 +32,25 @@ pub(crate) struct Log {
 impl Log {
     pub(crate) fn open(lang: &str) -> Log {
         let dir = log_dir().join(lang);
-        let _ = fs::create_dir_all(&dir);
-        prune(&dir, SystemTime::now());
         let now = SystemTime::now();
         let name = format!("{}-{}.log", compact(now), std::process::id());
         let path = dir.join(name);
-        let file = File::options().create(true).append(true).open(&path).ok();
+        let opened = fs::create_dir_all(&dir).and_then(|()| {
+            prune(&dir, now);
+            File::options().create(true).append(true).open(&path)
+        });
+        let file = match opened {
+            Ok(f) => Some(f),
+            Err(e) => {
+                // The relay runs without its log rather than not at all; say
+                // so once, where Claude Code keeps the server's stderr.
+                eprintln!(
+                    "fleet-lsp: cannot open the session log {}: {e}",
+                    path.display()
+                );
+                None
+            }
+        };
         Log { file, path }
     }
 

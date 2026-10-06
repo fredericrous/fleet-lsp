@@ -162,6 +162,15 @@ impl Queue {
         self.cv.notify_all();
     }
 
+    /// A writer moved bytes of a frame it is still writing: the queue is not
+    /// stalled, however large that frame is.
+    pub(crate) fn progress(&self) {
+        let mut g = self.lock();
+        if g.stalled_since.is_some() {
+            g.stalled_since = Some(Instant::now());
+        }
+    }
+
     /// Stops accepting; `pop` drains what is left, then returns `None`.
     pub(crate) fn close(&self) {
         self.lock().closed = true;

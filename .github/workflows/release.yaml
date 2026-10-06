@@ -131,27 +131,54 @@ jobs:
           path: ${{ steps.archive.outputs.asset }}
           if-no-files-found: error
 
-  publish:
-    name: publish the release
+  # Checksums for every run, dry or not. No write access here.
+  checksums:
+    name: checksums
     needs: [guard, build]
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+      - name: Which channels are armed
+        run: |
+          {
+            echo "### ${{ needs.guard.outputs.dry_run == 'true' && 'Dry run — nothing published' || 'Publication channels' }}"
+            echo
+            echo "| channel | armed | needs |"
+            echo "|---|---|---|"
+            echo "| GitHub release | ${{ needs.guard.outputs.dry_run == 'true' && 'NO (dry run)' || 'yes' }} | a \`v*\` tag |"
+            echo "| homebrew tap | ${{ vars.PUBLISH_TAP == 'true' && 'yes' || 'NO' }} | \`PUBLISH_TAP\` + \`TAP_DEPLOY_KEY\` in the \`release\` environment + a seeded \`Formula/fleet-lsp.rb\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The irreversible step: only for a tag, and write access only inside the
+  # `release` environment, which only `v*` tags may use.
+  publish:
+    name: publish the release
+    needs: [guard, checksums]
+    if: needs.guard.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          name: release-assets
           path: dist
-          merge-multiple: true
-      - name: Checksums
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
-      - name: Publish
-        if: needs.guard.outputs.dry_run == 'false'
-        env:
+      - env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -167,16 +194,6 @@ jobs:
             ' CHANGELOG.md > "$notes"
             gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes-file "$notes" dist/*
           fi
-      - name: Which channels are armed
-        run: |
-          {
-            echo "### Publication channels"
-            echo
-            echo "| channel | armed | needs |"
-            echo "|---|---|---|"
-            echo "| GitHub release | yes | nothing |"
-            echo "| homebrew tap | ${{ vars.PUBLISH_TAP == 'true' && 'yes' || 'NO' }} | \`PUBLISH_TAP\` + \`TAP_DEPLOY_KEY\` in the \`release\` environment + a seeded \`Formula/fleet-lsp.rb\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
 
   # The tap formula, from the PUBLISHED checksums. The deploy key is this
   # repository's own (not aval's), held by the `release` environment, which

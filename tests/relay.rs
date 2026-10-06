@@ -46,6 +46,56 @@ impl Fixture {
         Fixture { dir }
     }
 
+    /// A Cargo project whose `rustup` (first on the session's PATH) points
+    /// at the fake server in rust-analyzer flavour, under a toolchain path,
+    /// so the real rust resolver verifies it.
+    fn rust(name: &str) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("fleet-lsp-it-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.94.1\"\n",
+        )
+        .unwrap();
+        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
+        let ra_dir = dir.join("toolchains/1.94.1-x86_64-fake/bin");
+        fs::create_dir_all(&ra_dir).unwrap();
+        let ra = ra_dir.join("rust-analyzer");
+        let script = |p: &Path, body: String| {
+            fs::write(p, body).unwrap();
+            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        script(
+            &ra,
+            format!("#!/bin/sh\nexec python3 -u '{}' \"$@\"\n", fake.display()),
+        );
+        fs::create_dir_all(dir.join("fakebin")).unwrap();
+        script(
+            &dir.join("fakebin/rustup"),
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  which) echo '{}' ;;\n  run) echo 'rustc 1.94.1 (fake)' ;;\n  *) exit 1 ;;\nesac\n",
+                ra.display()
+            ),
+        );
+        Fixture { dir }
+    }
+
+    /// PATH with this fixture's fake tools first.
+    fn path_env(&self) -> String {
+        format!(
+            "{}:{}",
+            self.dir.join("fakebin").display(),
+            std::env::var("PATH").unwrap()
+        )
+    }
+
     fn events(&self) -> PathBuf {
         self.dir.join("events.log")
     }
@@ -257,16 +307,17 @@ const CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","para
 #[test]
 fn a_request_waits_for_readiness_and_keeps_its_order() {
     let fx = Fixture::new("ready", true);
-    let mut s = Session::start(&fx, &[("FAKE_READY_DELAY", "2")], true);
-    s.initialize(&fx.dir);
+    let mut s = Session::start(&fx, &[("FAKE_READY_DELAY", "3")], true);
+    // t = 0 is `initialized`: the fake becomes ready 3 s after it.
     let t0 = Instant::now();
+    s.initialize(&fx.dir);
     s.send(REFS);
     s.send(CHANGE);
     let (t, body) = s
         .recv_until(Duration::from_secs(20), |b| b.contains(r#""id":7"#))
         .expect("answered");
     assert!(
-        t.duration_since(t0) >= Duration::from_millis(1800),
+        t.duration_since(t0) >= Duration::from_secs(3),
         "answered before ready"
     );
     assert!(body.contains("file:///answer"), "{body}");
@@ -332,7 +383,11 @@ fn cancelling_a_held_request_releases_the_notification_behind_it() {
         .recv_until(Duration::from_secs(5), |b| b.contains(r#""id":7"#))
         .unwrap();
     assert!(body.contains("-32800"), "{body}");
-    assert!(wait_for(&fx, "didChange", Duration::from_millis(500)));
+    assert!(
+        wait_for(&fx, "didChange", Duration::from_millis(100)),
+        "{:?}",
+        fx.event_lines()
+    );
     assert!(t.elapsed() < Duration::from_secs(1));
 }
 
@@ -540,8 +595,19 @@ fn a_slow_but_reading_server_keeps_its_output_flowing() {
     // writes keep completing, so it is never "hung".
     let mut stdin = s.stdin.take().unwrap();
     let writer = thread::spawn(move || {
+        // One frame at the 32 MiB limit first: at 1 MiB/s it takes over 30 s
+        // to write, and must not read as a server that stopped reading.
+        let overhead =
+            r#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"t":""}}"#.len();
+        let huge = format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"t":"{}"}}}}"#,
+            "w".repeat((32 << 20) - overhead)
+        );
+        if stdin.write_all(&frame(&huge)).is_err() {
+            return None;
+        }
         let pad = "y".repeat((1 << 20) - 100);
-        for _ in 0..35 {
+        for _ in 0..3 {
             let body = format!(
                 r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"t":"{pad}"}}}}"#
             );
@@ -572,10 +638,10 @@ fn a_slow_but_reading_server_keeps_its_output_flowing() {
             .count()
     };
     let deadline = Instant::now() + Duration::from_secs(20);
-    while count() < 35 && Instant::now() < deadline {
+    while count() < 4 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(200));
     }
-    assert_eq!(count(), 35, "every notification delivered");
+    assert_eq!(count(), 4, "every notification delivered");
 }
 
 fn rss_kib(pid: u32) -> u64 {
@@ -730,4 +796,92 @@ fn closed_stdin_before_initialize_is_exit_1() {
     // An exit code, not a timing check: generous under parallel test load.
     assert_eq!(s.wait_exit(Duration::from_secs(15)), Some(1));
     let _ = s.try_send("{}");
+}
+
+fn start_rust(fx: &Fixture, env: &[(&str, &str)]) -> Session {
+    let path = fx.path_env();
+    let mut all: Vec<(&str, &str)> = vec![("FAKE_FLAVOR", "ra"), ("PATH", &path)];
+    all.extend_from_slice(env);
+    Session::start_args(fx, &all, true, &["serve", "rust", "--min-version", "0.1.0"])
+}
+
+#[test]
+fn rust_waits_for_quiescence_and_never_shows_the_status() {
+    let fx = Fixture::rust("ra-ready");
+    let mut s = start_rust(&fx, &[("FAKE_READY_DELAY", "3")]);
+    let t0 = Instant::now();
+    s.initialize(&fx.dir);
+    s.send(REFS);
+    let rx = s.rx.take().unwrap();
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut answered = None;
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok((t, body)) => {
+                if body.contains(r#""id":7"#) {
+                    answered = Some((t, body.clone()));
+                }
+                seen.push(body);
+            }
+            Err(_) if answered.is_some() => break,
+            Err(_) => {}
+        }
+    }
+    let (t, body) = answered.expect("answered");
+    assert!(
+        t.duration_since(t0) >= Duration::from_secs(3),
+        "answered before quiescent"
+    );
+    assert!(body.contains("file:///answer"), "{body}");
+    assert!(
+        !seen.iter().any(|b| b.contains("experimental/serverStatus")),
+        "a serverStatus frame reached the client"
+    );
+}
+
+#[test]
+fn rust_health_error_refuses_with_the_message() {
+    let fx = Fixture::rust("ra-error");
+    let mut s = start_rust(
+        &fx,
+        &[
+            ("FAKE_RA_HEALTH", "error"),
+            ("FAKE_RA_MESSAGE", "Failed to load workspaces."),
+        ],
+    );
+    s.initialize(&fx.dir);
+    s.send(REFS);
+    let (_, body) = s
+        .recv_until(Duration::from_secs(10), |b| b.contains(r#""id":7"#))
+        .unwrap();
+    assert!(
+        body.contains("workspace did not load: Failed to load workspaces."),
+        "{body}"
+    );
+    assert!(body.contains("cargo metadata"), "{body}");
+}
+
+#[test]
+fn rust_health_warning_answers_and_shows_the_warning() {
+    let fx = Fixture::rust("ra-warning");
+    let mut s = start_rust(
+        &fx,
+        &[
+            ("FAKE_RA_HEALTH", "warning"),
+            ("FAKE_RA_MESSAGE", "no matching package named `serde` found"),
+        ],
+    );
+    s.initialize(&fx.dir);
+    let (_, warn) = s
+        .recv_until(Duration::from_secs(10), |b| {
+            b.contains("window/showMessage")
+        })
+        .expect("warning shown");
+    assert!(warn.contains("cargo fetch"), "{warn}");
+    s.send(REFS);
+    let (_, body) = s
+        .recv_until(Duration::from_secs(10), |b| b.contains(r#""id":7"#))
+        .unwrap();
+    assert!(body.contains("file:///answer"), "{body}");
 }

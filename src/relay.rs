@@ -19,7 +19,7 @@
 
 use crate::cli::{Lang, Version};
 use crate::core::{Action, Config, Core, Input, ServerFilter};
-use crate::frame::{write_frame, Frame, FrameReader};
+use crate::frame::{write_frame_reporting, Frame, FrameReader};
 use crate::gate::{Barrier, Signal};
 use crate::json::{self, Json};
 use crate::log::{tilde, Log};
@@ -53,6 +53,8 @@ enum Ev {
     Input(Input),
     ChildStdoutClosed,
     ChildStdinBroken,
+    /// A line for the session log from a pipe thread.
+    Log(String),
 }
 
 pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) -> u8 {
@@ -144,6 +146,9 @@ struct Shell {
     tx: Sender<Ev>,
     outbox_child: VecDeque<Vec<u8>>,
     outbox_client: VecDeque<Vec<u8>>,
+    outbox_client_bytes: usize,
+    /// Since when fleet-lsp's own replies could not enter the reserved share.
+    outbox_client_since: Option<Instant>,
     pending_client: usize,
     child_stdout_closed: bool,
     exit: Option<u8>,
@@ -165,6 +170,8 @@ impl Shell {
             tx,
             outbox_child: VecDeque::new(),
             outbox_client: VecDeque::new(),
+            outbox_client_bytes: 0,
+            outbox_client_since: None,
             pending_client: 0,
             child_stdout_closed: false,
             exit: None,
@@ -201,6 +208,7 @@ impl Shell {
                 Ok(Ev::Input(i)) => self.step(i),
                 Ok(Ev::ChildStdoutClosed) => self.child_stdout_closed = true,
                 Ok(Ev::ChildStdinBroken) => self.child_stdout_closed = true,
+                Ok(Ev::Log(line)) => self.log.line(&line),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => self.step(Input::ClientGone),
             }
@@ -223,7 +231,12 @@ impl Shell {
         if child_stuck && self.exit.is_none() {
             self.step(Input::ChildHung);
         }
-        let client_stuck = self.client_out.stalled_for(now).is_some_and(|d| d >= HUNG);
+        // The reserved share being full counts as the client not reading.
+        let own_stuck = self
+            .outbox_client_since
+            .is_some_and(|t| now.saturating_duration_since(t) >= HUNG)
+            || self.outbox_client_bytes > QUEUE_CAP;
+        let client_stuck = own_stuck || self.client_out.stalled_for(now).is_some_and(|d| d >= HUNG);
         if client_stuck && self.exit.is_none() {
             self.log.line("the client stopped reading its input");
             self.step(Input::ClientGone);
@@ -238,7 +251,10 @@ impl Shell {
                         self.outbox_child.push_back(b);
                     }
                 }
-                Action::ToClient(b) => self.outbox_client.push_back(b),
+                Action::ToClient(b) => {
+                    self.outbox_client_bytes += b.len();
+                    self.outbox_client.push_back(b);
+                }
                 Action::SetFilter(f) => *self.filter.lock().unwrap_or_else(|p| p.into_inner()) = f,
                 Action::Log(s) => self.log.line(&s),
                 // After a forwarded `exit` the child should leave on its own;
@@ -256,11 +272,18 @@ impl Shell {
             }
         }
         while let Some(b) = self.outbox_client.pop_front() {
+            let len = b.len();
             if let Err(b) = self.client_out.try_push(OWN, b) {
                 self.outbox_client.push_front(b);
                 break;
             }
+            self.outbox_client_bytes -= len;
         }
+        self.outbox_client_since = match (self.outbox_client.is_empty(), self.outbox_client_since) {
+            (true, _) => None,
+            (false, None) => Some(Instant::now()),
+            (false, since) => since,
+        };
     }
 
     fn teardown(&mut self, code: u8) -> u8 {
@@ -355,7 +378,7 @@ fn client_writer(q: &Queue, tx: &Sender<Ev>) {
     let stdout = io::stdout();
     while let Some(p) = q.pop() {
         let mut lock = stdout.lock();
-        let ok = write_frame(&mut lock, &p.body).is_ok();
+        let ok = write_frame_reporting(&mut lock, &p.body, || q.progress()).is_ok();
         drop(lock);
         q.release(p.lane, p.body.len());
         if !ok {
@@ -367,7 +390,7 @@ fn client_writer(q: &Queue, tx: &Sender<Ev>) {
 
 fn child_writer(mut stdin: ChildStdin, q: &Queue, tx: &Sender<Ev>) {
     while let Some(p) = q.pop() {
-        let ok = write_frame(&mut stdin, &p.body).is_ok();
+        let ok = write_frame_reporting(&mut stdin, &p.body, || q.progress()).is_ok();
         q.release(p.lane, p.body.len());
         if !ok {
             let _ = tx.send(Ev::ChildStdinBroken);
@@ -398,8 +421,16 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
         match s.kind() {
             Kind::Notification => match method {
                 "experimental/serverStatus" => {
-                    if let Some(sig) = status_signal(&body) {
-                        let _ = tx.send(Ev::Input(Input::ServerSignal(sig)));
+                    match status_signal(&body) {
+                        Some(sig) => {
+                            let _ = tx.send(Ev::Input(Input::ServerSignal(sig)));
+                        }
+                        None => {
+                            let _ = tx.send(Ev::Log(format!(
+                                "unreadable experimental/serverStatus frame ({} bytes); the gate did not see it",
+                                body.len()
+                            )));
+                        }
                     }
                     forward = !f.swallow_status;
                 }

@@ -115,10 +115,18 @@ impl<R: Read> FrameReader<R> {
     }
 }
 
-/// Writes one frame (header + body) and flushes.
-pub(crate) fn write_frame<W: Write>(w: &mut W, body: &[u8]) -> io::Result<()> {
+/// Writes one frame in `CHUNK`-sized pieces, calling `moved` after each, so
+/// a reader that is slow but reading is told apart from one that stopped.
+pub(crate) fn write_frame_reporting<W: Write>(
+    w: &mut W,
+    body: &[u8],
+    mut moved: impl FnMut(),
+) -> io::Result<()> {
     write!(w, "Content-Length: {}\r\n\r\n", body.len())?;
-    w.write_all(body)?;
+    for chunk in body.chunks(CHUNK) {
+        w.write_all(chunk)?;
+        moved();
+    }
     w.flush()
 }
 
@@ -171,7 +179,7 @@ mod tests {
     fn framed(bodies: &[&[u8]]) -> Vec<u8> {
         let mut out = Vec::new();
         for b in bodies {
-            write_frame(&mut out, b).unwrap();
+            write_frame_reporting(&mut out, b, || {}).unwrap();
         }
         out
     }

@@ -527,6 +527,10 @@ fn go(git: PathBuf, root: PathBuf) -> Resolution {
         };
     }
     let need = go_directive(&gomod).or_else(|| go_directive(&gowork));
+    // holds-until: the repository pins gopls with `tool golang.org/x/tools/gopls`
+    // in go.mod. Until then the PATH gopls is accepted only as `compatible`
+    // (built with a Go at least the module's), a recorded deviation from
+    // build.toolchain-source.
     let Some(gopls) = which("gopls") else {
         return refused(
             "no gopls on PATH and no `tool golang.org/x/tools/gopls` in go.mod".into(),
@@ -820,6 +824,10 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
         r.version = Some(installed);
         return r;
     }
+    // holds-until: the repository pins typescript-language-server. Until then
+    // the adapter comes from PATH (installed by the Brewfile); the TypeScript
+    // that answers is still the repository's, checked by the gate against the
+    // adapter's own selection report.
     let Some(adapter) = which("typescript-language-server") else {
         let mut r = refused(
             "typescript-language-server is not installed".into(),

@@ -16,6 +16,10 @@ FAKE_SLOW_READ    read stdin at this many bytes per second
 FAKE_FLOOD_MIB    after `initialized`, send this many MiB of diagnostics
 FAKE_FLOOD_FRAME  size of each diagnostics frame in bytes (default 1 MiB)
 FAKE_EXIT_AFTER   exit on its own this many seconds after `initialized`
+FAKE_FLAVOR=ra    behave like rust-analyzer instead: readiness is
+                  `experimental/serverStatus` quiescent, with
+FAKE_RA_HEALTH    ok | warning | error (default ok) and
+FAKE_RA_MESSAGE   the status message
 """
 import json, os, sys, time, threading
 
@@ -80,10 +84,19 @@ def flood():
 
 
 def become_ready(delay):
+    if os.environ.get("FAKE_FLAVOR") == "ra":
+        send({"jsonrpc": "2.0", "method": "experimental/serverStatus",
+              "params": {"health": "ok", "quiescent": False}})
     time.sleep(delay)
     event("ready")
-    send({"jsonrpc": "2.0", "method": "window/logMessage",
-          "params": {"type": 3, "message": "Found 3 source files"}})
+    if os.environ.get("FAKE_FLAVOR") == "ra":
+        params = {"health": os.environ.get("FAKE_RA_HEALTH", "ok"), "quiescent": True}
+        if os.environ.get("FAKE_RA_MESSAGE"):
+            params["message"] = os.environ["FAKE_RA_MESSAGE"]
+        send({"jsonrpc": "2.0", "method": "experimental/serverStatus", "params": params})
+    else:
+        send({"jsonrpc": "2.0", "method": "window/logMessage",
+              "params": {"type": 3, "message": "Found 3 source files"}})
 
 
 def main():
@@ -137,4 +150,7 @@ def main():
                 "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}]})
 
 
+if "--version" in sys.argv:
+    print("rust-analyzer 1.94.1 (fake)" if os.environ.get("FAKE_FLAVOR") == "ra" else "fake 0")
+    sys.exit(0)
 main()

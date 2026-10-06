@@ -74,7 +74,9 @@ impl Gate {
     pub(crate) fn new(barrier: Barrier) -> Gate {
         let state = match barrier {
             Barrier::None => State::Open,
-            _ => State::Closed,
+            Barrier::RustAnalyzer | Barrier::PyrightEnumeration | Barrier::TypeScript { .. } => {
+                State::Closed
+            }
         };
         Gate {
             barrier,
