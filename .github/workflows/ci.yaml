@@ -15,6 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/check-no-deps.sh
+      - run: ./scripts/check-plugin.sh
 
   rust:
     # Both platforms the tap ships: the relay is pipes, threads and child

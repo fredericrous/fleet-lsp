@@ -37,14 +37,43 @@ manifests).
 
 ```sh
 brew install fredericrous/tap/fleet-lsp
-claude plugin marketplace add fredericrous/fleet-lsp
+claude plugin marketplace add fredericrous/fleet-lsp#release
 claude plugin install fleet-lsp@fleet-lsp
 ```
+
+The marketplace is read from the `release` branch, which only the release
+workflow moves, after the matching binary is installable from the tap: a
+merge to `main` never reaches a session. A plugin newer than the installed
+binary refuses every query with `brew upgrade fleet-lsp`.
 
 Then turn off the official LSP plugins it replaces, so each extension has one
 server: `gopls-lsp`, `rust-analyzer-lsp`, `typescript-lsp`, `pyright-lsp`.
 
 Check a repository: `cd <repo> && fleet-lsp doctor`.
+
+## What a session sees
+
+- **A query before the server has loaded** waits, up to 370 s (twice the
+  slowest cold start measured), then gets `server not ready after 370s`.
+- **A server that cannot be verified** answers every query with an error
+  naming the cause and the fix, e.g.
+  `fleet-lsp: python: stale venv: pyright 1.1.414, pinned 1.1.411; fix: uv sync`.
+- **rust-analyzer that could not load the workspace** answers
+  `rust-analyzer: workspace did not load: …` with a fix.
+
+## Limits
+
+- Claude Code starts one set of servers per session, rooted where the
+  session started. Start the session in the repository (or the project);
+  outside one, every query answers `not in a git repository`.
+- rust-analyzer reports unfetched dependencies as a *warning*: answers about
+  your own code stay right, answers that reach into the missing crates are
+  incomplete. fleet-lsp logs it and sends it as `window/showMessage`, but
+  Claude Code does not show that message to the agent — run `cargo fetch`.
+- A pyright or typescript-language-server version whose readiness signal
+  has not been measured gets no barrier (`doctor` says so): an empty answer
+  right after start is not evidence. Measure it with `scripts/lsp-probe.py`.
+- One log file per session under `~/.local/state/fleet-lsp/<lang>/`.
 
 ## Uninstall
 

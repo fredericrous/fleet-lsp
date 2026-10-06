@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "fleet-lsp",
+  "description": "Pinned, ready language servers for Claude Code's LSP tool. Add it from the release branch: fredericrous/fleet-lsp#release. Needs Claude Code 2.1.288 or newer and the fleet-lsp binary (brew install fredericrous/tap/fleet-lsp).",
+  "owner": {
+    "name": "Frederic Rousseau",
+    "url": "https://github.com/fredericrous"
+  },
+  "plugins": [
+    {
+      "name": "fleet-lsp",
+      "source": "./plugins/fleet-lsp",
+      "description": "rust-analyzer, gopls, pyright and typescript-language-server, each verified against the repository's pin and answering only once loaded",
+      "category": "development"
+    }
+  ]
+}

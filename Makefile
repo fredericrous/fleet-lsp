@@ -16,6 +16,7 @@ toolchain:
 
 deps:
 	@./scripts/check-no-deps.sh
+	@./scripts/check-plugin.sh
 
 lint:
 	$(CARGO) fmt --all --check
