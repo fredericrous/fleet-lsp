@@ -272,7 +272,7 @@ with the upgrade command, instead of running a mismatched pair.
 
 ## Phases
 
-- [ ] Phase 0 — **readiness and pin investigation, before any shipping
+- [x] Phase 0 — **readiness and pin investigation, before any shipping
       code** (scratch harness outside the crate). For rust-analyzer (1.94.1,
       1.91.0), gopls v0.23.0, pyright 1.1.411, typescript-language-server +
       duro-app's TypeScript, in a real repo each:
@@ -291,7 +291,7 @@ with the upgrade command, instead of running a mismatched pair.
       server's exit on stdin EOF. Result: `docs/readiness.md`, one row per
       server/version: barrier kind, evidence, cold ready times (sets the
       ceiling).
-- [ ] 🧑 decision: per server, accept the barrier Phase 0 found, or the
+- [x] 🧑 decision: per server, accept the barrier Phase 0 found, or the
       narrowed promise where it found none.
 - [ ] Phase 1 — repo skeleton: `gh repo create fredericrous/fleet-lsp --public`,
       single crate from attest's layout and aval's `Makefile`, `[lints]`,
@@ -350,6 +350,20 @@ with the upgrade command, instead of running a mismatched pair.
 - 2026-10-06 — gopls without a `tool` directive and the TS adapter come from
   PATH: verdict `compatible` / adapter report checked, recorded deviations
   from `build.toolchain-source`, `holds-until:` the repositories pin them.
+
+- 2026-10-07 — Phase 0 done (`docs/readiness.md`). Person's decisions:
+  barriers accepted for all four — rust-analyzer `serverStatus`
+  `quiescent: true`; gopls self-barrier (no hold); pyright 1.1.411 the
+  enumerator's `Found <n> source file(s)` / `No source files found.` log
+  line; typescript-language-server 6.0.1 the end of the `Initializing JS/TS
+  language features…` progress token — the last two keyed to the measured
+  version, any other version gets the narrowed promise until measured.
+  rust-analyzer `health: warning` for missing dependencies → answer + warn
+  (as planned). Ceiling 370 s (2 × lldap's 185 s to quiescence),
+  `requestTimeout` 400 s. Consequences adopted: teardown deadline 10 s
+  (rust-analyzer took 7.4 s to exit on EOF); fleet-lsp keeps
+  `python.analysis.logLevel` ≥ Information in the `workspace/configuration`
+  replies it relays, or pyright's barrier line never arrives.
 
 ## Verification
 
