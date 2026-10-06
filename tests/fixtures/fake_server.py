@@ -46,6 +46,8 @@ class Reader:
         # the whole buffer, so a 32 MiB frame cost gigabytes of copying.
         self.buf = bytearray()
         self.rate = rate
+        self.read_bytes = 0
+        self.started = None
 
     def fill(self):
         want = 65536 if not self.rate else max(1, int(self.rate) // 20)
@@ -54,7 +56,14 @@ class Reader:
             return False
         self.buf += chunk
         if self.rate:
-            time.sleep(len(chunk) / float(self.rate))
+            # Paced against a schedule, not by sleeping per read: a slow
+            # machine's oversleeping does not drag the rate below the target.
+            if self.started is None:
+                self.started = time.monotonic()
+            self.read_bytes += len(chunk)
+            ahead = self.read_bytes / float(self.rate) - (time.monotonic() - self.started)
+            if ahead > 0:
+                time.sleep(ahead)
         return True
 
     def message(self):

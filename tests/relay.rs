@@ -604,8 +604,10 @@ fn a_slow_but_reading_server_keeps_its_output_flowing() {
     s.initialize(&fx.dir);
     thread::sleep(Duration::from_millis(300));
     // 35 MiB the server reads at 1 MiB/s: the child queue stays busy, but
-    // writes keep completing, so it is never "hung".
+    // writes keep moving, so it is never "hung". Waits below are on events
+    // with generous deadlines: a slow runner reads slower, it does not fail.
     let mut stdin = s.stdin.take().unwrap();
+    let started = Instant::now();
     let writer = thread::spawn(move || {
         // One frame at the 32 MiB limit first: at 1 MiB/s it takes over 30 s
         // to write, and must not read as a server that stopped reading.
@@ -635,25 +637,35 @@ fn a_slow_but_reading_server_keeps_its_output_flowing() {
         .recv_until(Duration::from_secs(20), |b| b
             .contains("publishDiagnostics"))
         .is_some());
-    assert!(wait_for(&fx, "flooded", Duration::from_secs(30)));
-    thread::sleep(Duration::from_secs(36));
-    let _stdin = writer.join().unwrap().expect("every write accepted");
+    assert!(wait_for(&fx, "flooded", Duration::from_secs(60)));
+    // The 32 MiB frame arrives only after > 30 s of writing; fleet-lsp must
+    // still be there when it does.
+    assert!(
+        wait_for(&fx, "textDocument/didChange", Duration::from_secs(240)),
+        "the 32 MiB frame never arrived"
+    );
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_secs(30),
+        "the write was not slow: {took:?}"
+    );
     assert!(
         s.proc.try_wait().unwrap().is_none(),
         "torn down while the server was reading"
     );
-    // At 1 MiB/s the server may still be reading the last few.
     let count = || {
         fx.event_lines()
             .iter()
             .filter(|l| l.contains("didChange"))
             .count()
     };
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while count() < 4 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(200));
     }
     assert_eq!(count(), 4, "every notification delivered");
+    assert!(s.proc.try_wait().unwrap().is_none(), "torn down at the end");
+    let _stdin = writer.join().unwrap().expect("every write accepted");
 }
 
 fn rss_kib(pid: u32) -> u64 {
