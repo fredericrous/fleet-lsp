@@ -42,7 +42,9 @@ def send(obj):
 
 class Reader:
     def __init__(self, rate=None):
-        self.buf = b""
+        # A bytearray: `+=` appends in place. With `bytes` each append copied
+        # the whole buffer, so a 32 MiB frame cost gigabytes of copying.
+        self.buf = bytearray()
         self.rate = rate
 
     def fill(self):
@@ -59,13 +61,15 @@ class Reader:
         while b"\r\n\r\n" not in self.buf:
             if not self.fill():
                 return None
-        head, rest = self.buf.split(b"\r\n\r\n", 1)
+        end = self.buf.index(b"\r\n\r\n")
+        head, rest = bytes(self.buf[:end]), self.buf[end + 4:]
         n = int([l for l in head.split(b"\r\n") if l.lower().startswith(b"content-length")][0].split(b":")[1])
         self.buf = rest
         while len(self.buf) < n:
             if not self.fill():
                 return None
-        body, self.buf = self.buf[:n], self.buf[n:]
+        body = bytes(self.buf[:n])
+        del self.buf[:n]
         return json.loads(body)
 
 
