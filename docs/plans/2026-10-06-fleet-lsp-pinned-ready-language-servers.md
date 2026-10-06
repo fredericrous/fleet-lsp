@@ -293,21 +293,21 @@ with the upgrade command, instead of running a mismatched pair.
       ceiling).
 - [x] 🧑 decision: per server, accept the barrier Phase 0 found, or the
       narrowed promise where it found none.
-- [ ] Phase 1 — repo skeleton: `gh repo create fredericrous/fleet-lsp --public`,
+- [x] Phase 1 — repo skeleton: `gh repo create fredericrous/fleet-lsp --public`,
       single crate from attest's layout and aval's `Makefile`, `[lints]`,
       `rust-toolchain.toml` 1.94.1, `rust-version` measured with
       `cargo +<v> check --locked`, `.adr.yaml` + pack, CI (`ci.yaml`,
       `adr.yaml`), `check-no-deps.sh`, README with install and, right below,
       uninstall naming the state dir (`cli.dist.single-binary-easy-uninstall`).
-- [ ] Phase 2 — transport + relay: framing, top-level scanner, typed ids,
+- [x] Phase 2 — transport + relay: framing, top-level scanner, typed ids,
       byte-bounded queues and writer threads, overload rules, teardown, stub,
       stdout discipline, exit codes, `--min-version`.
-- [ ] Phase 3 — roots, resolvers and pin verification (table above),
+- [x] Phase 3 — roots, resolvers and pin verification (table above),
       `doctor`, session logs.
-- [ ] Phase 4 — barriers exactly as decided after Phase 0 (rust-analyzer
+- [x] Phase 4 — barriers exactly as decided after Phase 0 (rust-analyzer
       status machine with all health states; adapter TypeScript check;
       self-barrier servers pass through).
-- [ ] Phase 5 — plugin manifests, `release.yaml` + `bump-tap.py` from aval,
+- [x] Phase 5 — plugin manifests, `release.yaml` + `bump-tap.py` from aval,
       four targets for the tap's four url/sha pairs (`aarch64-apple-darwin`,
       `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
       `aarch64-unknown-linux-gnu`); a **separate** homebrew-tap deploy key in
@@ -364,6 +364,17 @@ with the upgrade command, instead of running a mismatched pair.
   (rust-analyzer took 7.4 s to exit on EOF); fleet-lsp keeps
   `python.analysis.logLevel` ≥ Information in the `workspace/configuration`
   replies it relays, or pyright's barrier line never arrives.
+
+- 2026-10-07 — Implementation (Phases 1–5). Teardown bound is 30 s hung +
+  10 s grace (Phase 0) + up to 2 s for fleet-lsp's own last replies = 42 s,
+  not the 36 s written before the grace went to 10 s; the integration tests
+  assert ≤ 45 s. The marketplace is read from `release` with the GitHub
+  marketplace-source `#ref` form (`fredericrous/fleet-lsp#release`), the
+  documented way to pin it. A notification arriving after an overload flush
+  with nothing held ahead is forwarded, not held (found by the overload
+  test). Known limit, recorded in the README: rust-analyzer's `warning`
+  reaches the session log and `window/showMessage`, but Claude Code does not
+  show `showMessage` to the agent.
 
 ## Verification
 
@@ -438,6 +449,62 @@ with the upgrade command, instead of running a mismatched pair.
   merge to main, a fresh plugin install resolves the `v0.1.0` tag commit.
 - Phase 6: `chezmoi apply` of (a) alone leaves the official plugins on; (b)
   only after `doctor` exits 0 in relais and authelia-oidc-operator.
+
+Observed 2026-10-07 (macOS x86_64, release build, real Claude Code 2.1.292
+sessions via `--plugin-dir`, official LSP plugins off for the session):
+
+- `make check`: 89 unit + 20 integration tests green (twice in a row,
+  the four CPU-heavy ones serialized behind a lock), clippy clean, no
+  dependencies, msrv 1.74 builds, plugin manifest matches 0.1.0.
+- Integration, all observed: held request answered at ≥ 1.8 s with a 2 s
+  readiness delay, `didChange` after it; `workspace/configuration` reply
+  delivered within 1 s with `logLevel` rewritten to Information; cancel →
+  -32800 and the trailing `didChange` within 500 ms; `FLEET_LSP_CEILING_MS=2000`
+  → error at ~2 s reading "after 2s"; shutdown+exit → 0, fake reaped;
+  stdin EOF and SIGTERM while held → fake gone < 6 s; fake exiting on its
+  own → "the server exited", exit 1; server not reading → torn down at
+  42 s; client not reading → torn down at 33 s; slow (1 MiB/s) server not
+  torn down while a 32 MiB frame takes > 30 s to write (progress counted
+  per 64 KiB chunk), all 4 notifications delivered; rust-analyzer-shaped
+  fake via the real rust resolver: answered only after quiescence (≥ 3 s),
+  no `serverStatus` frame reached the client, `health: error` → "workspace
+  did not load … cargo metadata", `warning` → answered plus a
+  `window/showMessage` naming `cargo fetch`; 1,000 requests + 5 × 32 MiB
+  notifications while closed → 1,000 overload errors, 5/5 notifications,
+  peak RSS 194 MiB (≤ 202); stub refusal with capabilities, `uv sync`,
+  shutdown → null, exit → 0; `--min-version 99.0.0` → upgrade refusal;
+  `doctor` into a closed pipe → exit 0, no panic.
+- Live, first call of a cold session: relais `incomingCalls resume.rs:169`
+  → 7 callers incl. `main.rs:3986 reconcile_run` (gate open at 14.5 s);
+  duro-app → the 8 callers of 2026-10-06 (gate open 7.4 s); authelia →
+  SetupWithManager, TestAssemble, TestAssembleConfidentialClientWithoutSecretRef;
+  trade-agents → the probe file's symbols (gate open 1.6 s); session in
+  trade-agents `packages/agents` → workspace root, 58 references incl.
+  `backtest_runner/worker.py`.
+- Live refusals, quoted by the agent: openwebui-tts-proxy → `no
+  pyright==<version> in pyproject.toml; fix: uv add --dev 'pyright==1.1.411'`
+  (it has no pin, so this precedes the `uv sync` case the plan named);
+  `~/Developer/Perso` → `not in a git repository … fix: none — start the
+  session inside a repository`; broken `Cargo.toml` → `rust-analyzer:
+  workspace did not load: Failed to load workspaces.; fix: run cargo metadata …`.
+- Live, dependencies not fetched: **not as the plan wrote it.** Answers are
+  correct (`a`, `main`), the warning with `cargo fetch` is in the session
+  log and sent as `window/showMessage`, but the agent does not see it
+  (Claude Code does not surface `showMessage`). Recorded as a limit.
+- `doctor`: relais rust 1.94.1 verified; lldap rust 1.91.0 verified **and
+  typescript refused** (`app/pkg` has a package.json and no lockfile) →
+  exit 1; sre-agent pyright 1.1.411 verified; duro-app TypeScript 5.9.3
+  verified (adapter 6.0.1); authelia gopls v0.23.0 compatible (go1.27.1 ≥
+  1.25.12); widest line 75; `--json` parses.
+- Not yet observed (need the release): CI on GitHub, the release run,
+  `brew install`, the fresh plugin install resolving the tag commit, and
+  Phase 6.
+
+## Implementation review
+
+- Round 1 approve-with-changes (84k tokens, 101 s): holds-until comments, publish write access only in `release`, bounded own-reply outbox, rust-analyzer fake tests, thresholds restored, log-open error said, exhaustive `Barrier` — all fixed; plus two hand-checks fixed (per-chunk writer progress, unreadable `serverStatus` logged).
+- Delta approve-with-changes (44k tokens, 47 s): all 7 resolved; one new low finding (own-reply clock could tear down a slow but reading client) fixed with the reviewer's edit in 662185a, with heavy tests serialized — that commit is after the reviewed tree.
+- Next phase: 🧑 cut v0.1.0.
 
 ## Outcome
 
