@@ -4,7 +4,17 @@
 //! it reads argv, picks a command, and maps the outcome to an exit code.
 
 mod cli;
+mod core;
+mod doctor;
+mod frame;
+mod gate;
+mod json;
+mod log;
 mod out;
+mod queue;
+mod relay;
+mod resolve;
+mod scan;
 
 use cli::{Command, Usage};
 use std::process::ExitCode;
@@ -20,10 +30,12 @@ fn main() -> ExitCode {
             out::stdout(&format!("fleet-lsp {}\n", cli::Version::own()));
             ExitCode::SUCCESS
         }
-        Ok(Command::Doctor { .. }) | Ok(Command::Serve { .. }) => {
-            eprintln!("fleet-lsp: not implemented yet");
-            ExitCode::from(1)
+        Ok(Command::Doctor { json }) => {
+            let (text, code) = doctor::run(json);
+            out::stdout(&text);
+            ExitCode::from(code)
         }
+        Ok(Command::Serve { lang, min_version }) => ExitCode::from(relay::serve(lang, min_version)),
         Err(Usage(msg)) => {
             eprintln!("fleet-lsp: {msg}\nTry: fleet-lsp --help");
             ExitCode::from(2)
