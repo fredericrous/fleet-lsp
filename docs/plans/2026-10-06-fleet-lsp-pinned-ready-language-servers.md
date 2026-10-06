@@ -505,6 +505,7 @@ sessions via `--plugin-dir`, official LSP plugins off for the session):
 - Round 1 approve-with-changes (84k tokens, 101 s): holds-until comments, publish write access only in `release`, bounded own-reply outbox, rust-analyzer fake tests, thresholds restored, log-open error said, exhaustive `Barrier` — all fixed; plus two hand-checks fixed (per-chunk writer progress, unreadable `serverStatus` logged).
 - Delta approve-with-changes (44k tokens, 47 s): all 7 resolved; one new low finding (own-reply clock could tear down a slow but reading client) fixed with the reviewer's edit in 662185a, with heavy tests serialized.
 - Stale-tree delta on dfa80c663130 (the pushed tree), required by the push hook: approve (29k tokens, 19 s), no new findings.
+- The push gate then failed the slow-reader test once (the fake's read buffer was quadratic under CPU load); fixture fixed in d79049a, delta on 3d852577e88a: approve (25k tokens, 13 s).
 - Next phase: 🧑 cut v0.1.0.
 
 ## Outcome
