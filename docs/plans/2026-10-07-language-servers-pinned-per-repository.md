@@ -93,8 +93,9 @@ constant bumped, then the repositories in one batch.
   cwd = the project root and `GOTOOLCHAIN=local` (no silent toolchain
   download). gopls is therefore built by the local Go, which must be ≥ the
   tools module's `go` line (gopls v0.23.0 requires go 1.26.0) and ≥ the
-  project go.mod's `go`/`toolchain` line (`GOTOOLCHAIN=local` also governs
-  gopls's own `go list` on the workspace) — else refused.
+  project go.mod's `go` line (`GOTOOLCHAIN=local` also governs gopls's own
+  `go list` on the workspace, and ignores a higher `toolchain` line, so
+  that line is not compared) — else refused.
   This is a stated deviation from build.toolchain-source: gopls's toolchain
   is the machine's Go, not the module's ADR-0019 pin; `doctor` prints the
   Go that builds it.
@@ -104,8 +105,9 @@ constant bumped, then the repositories in one batch.
 - The `compatible` verdict and the PATH gopls go; `verdict: "compatible"`
   leaves `--json` (fleet consumers grepped first; CHANGELOG lists the new
   verdict set — a 0.x minor under ADR-0012).
-- First run builds gopls (cached after): `doctor` prints `building gopls
-  (first run only)` and warms the cache; a build failure is its own refusal.
+- First run builds gopls (cached after): `doctor` prints `checking that
+  gopls builds (the first run builds it: about a minute)` on stderr and
+  warms the cache; a build failure is its own refusal.
   The plugin's `startupTimeout` is set from Phase 5's measurement:
   ≥ 2 × (cold build + 7.7 s ready).
 
@@ -341,6 +343,14 @@ Observed 2026-10-07:
     line; a machine with an older Go is refused with "upgrade Go".
   - Homebrew `rust` 1.99 reappeared ahead of rustup (clippy lint in amont's
     pre-commit); uninstalled again.
+- Phase 5 live, shared tools module (after the implementation review):
+  homelab `wasm/subsonic-auth` (go 1.22.12), fresh `claude -p`
+  `documentSymbol main.go` → expected the file's 11 top-level declarations
+  → answered 11; the log shows git root `homelab`, project root
+  `wasm/subsonic-auth`, pin `tools/go.mod … v0.23.0`, verdict verified.
+- Ignored root, real git (after the review): a `git init` tree with
+  `copy/` in .gitignore → `copy is ignored by git`; an unreadable `.git`
+  → `git check-ignore failed: …`, never "not ignored".
 
 ## Implementation review
 
