@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/fleet-lsp
 repos: [fleet-lsp, dotfiles, homebrew-tap]
 adrs: [ADR-0008, ADR-0012, ADR-0017, ADR-0019, ADR-0020, ADR-0021]
@@ -327,8 +327,11 @@ with the upgrade command, instead of running a mismatched pair.
       off, agent note: "fleet-lsp answers only from the pinned server once it
       is ready; an error names its cause and fix" (plus the narrowed promise
       for any server Phase 0 left without a barrier). Rollback = revert (b).
-- [ ] Phase 7 — after a two-week soak: `npm rm -g pyright typescript
-      typescript-language-server`, delete `~/go/bin/gopls.v0.18.1.bak`.
+- [x] Phase 7 — cleanup: `npm rm -g pyright typescript` (the global copies
+      fleet-lsp never runs), delete `~/go/bin/gopls.v0.18.1.bak`. The
+      npm `typescript-language-server` stays: it is the adapter fleet-lsp
+      verifies, and the only one installed (dotfiles#18 dropped the Brewfile
+      line — no Homebrew bottle on Intel macOS).
 
 ## Decision log
 
@@ -390,6 +393,10 @@ with the upgrade command, instead of running a mismatched pair.
   core unit test releases the trailing notification in the same step as
   the cancel; and with the gate never opening, any delivery at all proves
   the release.
+
+- 2026-10-07 — Phase 7 run the same day, not after the two-week soak:
+  the person's choice. Its text amended first: the npm adapter is kept,
+  since dotfiles#18 removed the Homebrew one.
 
 ## Verification
 
@@ -557,6 +564,32 @@ Observed 2026-10-07, release (person's decision: merge + release now):
 - PR #1 CI failed the same test on macos-latest (fixed-time waits vs a slow runner); test made event-driven and the fake paced by schedule, delta on ced8a245e703: approve (28k tokens, 25 s).
 - Next phase: 🧑 cut v0.1.0.
 
+- Phase 7 (2026-10-07): `npm rm -g pyright typescript` removed 3
+  packages, `typescript-language-server@6.0.1` kept;
+  `~/go/bin/gopls.v0.18.1.bak` deleted. After it: `fleet-lsp doctor` exit 0
+  in duro-app (TypeScript 5.9.3 verified, adapter 6.0.1), sre-agent and
+  trade-agents (pyright 1.1.411 verified), authelia-oidc-operator (gopls
+  compatible), relais (rust 1.94.1 verified); a fresh session's
+  `incomingCalls useCopyFeedback.ts:9` → 8 callers.
+
 ## Outcome
+
+Shipped: fleet-lsp v0.1.0 — the Claude Code `LSP` tool now answers from
+each repository's pinned rust-analyzer, gopls, pyright or TypeScript, and
+only once that server has loaded; refusals name their cause and fix. The
+four code-reading review agents carry it (dotfiles#17); the official LSP
+plugins are off.
+
+Not shipped as planned: a rust-analyzer *warning* (unfetched dependencies)
+does not reach the agent — Claude Code does not surface
+`window/showMessage` (README, Limits). The cancel integration test's
+window is 1 s, not 100 ms (shared CI runners).
+
+Surprised: three of four servers answer *wrong* (empty) while loading —
+only gopls waits on its own (docs/readiness.md); pyright answers empty to
+a request pending when its configuration lands; the time-based gate the
+first draft proposed would have shipped false-ready answers. And most of
+the integration-test churn was the test harness, not the relay: a
+quadratic Python buffer and fixed-time waits on slow runners.
 
 <!-- panel: repos=fleet-lsp,dotfiles,homebrew-tap adds=lang:rust,cli,ops reviewers=backend,lang:rust,tui,unix,platform body-sha=3f0368b55cb4 -->
