@@ -27,6 +27,14 @@ pub(crate) fn run(json: bool) -> (String, u8) {
         .into_iter()
         .filter(|l| resolve::present(*l, &cwd))
         .map(|l| resolve::resolve(l, &cwd))
+        .map(|mut r| {
+            if r.lang == Lang::Go && r.verdict == Verdict::Verified {
+                // stderr: progress is not the report.
+                eprintln!("fleet-lsp: building gopls (first run only, about a minute)");
+                resolve::warm_gopls(&mut r);
+            }
+            r
+        })
         .collect();
     let code = u8::from(
         found
@@ -53,7 +61,6 @@ fn rel(path: &Path, git: &Path) -> String {
 fn verdict_word(v: &Verdict) -> &'static str {
     match v {
         Verdict::Verified => "verified",
-        Verdict::Compatible => "compatible",
         Verdict::Refused { .. } => "refused",
     }
 }

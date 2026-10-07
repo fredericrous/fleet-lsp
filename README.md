@@ -13,7 +13,7 @@ fleet-lsp sits between Claude Code and the server and makes two promises:
 - **Pinned.** The server that answers is verified against the repository's
   own pin (`rust-toolchain.toml`, the `pyright==` dev dependency and
   `uv.lock`, the `typescript` and `typescript-language-server` lockfile
-  entries, the `go.mod` `tool` directive). When it cannot be verified, every query gets an error naming
+  entries, gopls's `tool` directive in `tools/go.mod` or `go.mod`). When it cannot be verified, every query gets an error naming
   the cause and the command that fixes it — never an answer from the wrong
   version.
 - **Ready.** A query is answered only after the server has finished loading,
@@ -22,7 +22,7 @@ fleet-lsp sits between Claude Code and the server and makes two promises:
 | language | server | readiness barrier |
 |---|---|---|
 | Rust | rust-analyzer from the pinned rustup toolchain | `experimental/serverStatus` quiescent; `health: error` becomes an error answer |
-| Go | gopls (`go tool gopls`, else `gopls` on PATH built with a new enough Go) | gopls blocks until its workspace is loaded |
+| Go | gopls from the repository's `tool` directive — the nearest `tools/go.mod` (run with `-modfile`) or the module's `go.mod` — built by the machine's Go under `GOTOOLCHAIN=local` | gopls blocks until its workspace is loaded |
 | Python | pyright from the repository's `.venv` | pyright's workspace-enumeration message (1.1.411) |
 | TypeScript | typescript-language-server from the repository's own `node_modules` (an exact devDependency), with the repository's TypeScript | the end of its "Initializing JS/TS language features" progress (6.0.1) |
 
@@ -73,6 +73,15 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
 - A pyright or typescript-language-server version whose readiness signal
   has not been measured gets no barrier (`doctor` says so): an empty answer
   right after start is not evidence. Measure it with `scripts/lsp-probe.py`.
+- gopls is built by the machine's Go (`GOTOOLCHAIN=local`), which must be
+  at least the `go` line of the tools module and of the project's go.mod;
+  it is not the toolchain the module pins (a stated deviation from
+  build.toolchain-source). The first start builds it — about a minute,
+  more on a loaded machine — and a session shows nothing while it does:
+  run `fleet-lsp doctor` once in the repository to build it ahead.
+- A `tools/go.mod` cannot serve a project with a `vendor/` directory or a
+  `go.work` in scope (`-modfile` cannot run with either): pin gopls in that
+  module's go.mod instead.
 - One log file per session under `~/.local/state/fleet-lsp/<lang>/`.
 
 ## Uninstall

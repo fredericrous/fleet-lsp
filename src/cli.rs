@@ -98,7 +98,7 @@ serve   Speak LSP on stdin/stdout in front of the pinned server. Claude
         Code runs it from the fleet-lsp plugin; a person never does.
 
 Exit codes:
-  doctor  0 every language verified or compatible
+  doctor  0 every language verified
           1 a language refused, or not in a git repository
           2 usage error
   serve   0 exit after shutdown, 1 otherwise, 2 usage error or a terminal

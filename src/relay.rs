@@ -613,7 +613,6 @@ fn header(
             r.version.as_deref().unwrap_or("-"),
             match &r.verdict {
                 Verdict::Verified => "verified".to_string(),
-                Verdict::Compatible => "compatible".to_string(),
                 Verdict::Refused { reason, .. } => format!("refused ({reason})"),
             },
             r.barrier,

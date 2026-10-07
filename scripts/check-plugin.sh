@@ -12,6 +12,9 @@ n=$(grep -c "\"--min-version\", \"$v\"" "$m" || true)
 [ "$n" = 4 ] || { echo "plugin.json passes --min-version $v $n times, want 4" >&2; fail=1; }
 t=$(grep -c '"requestTimeout": 400000' "$m" || true)
 [ "$t" = 4 ] || { echo "plugin.json sets requestTimeout 400000 $t times, want 4" >&2; fail=1; }
+# gopls's first start builds it: 2 x (cold build 95 s on a loaded machine + 7.7 s).
+s=$(grep -c '"startupTimeout": 210000' "$m" || true)
+[ "$s" = 1 ] || { echo "plugin.json sets the go startupTimeout 210000 $s times, want 1" >&2; fail=1; }
 grep -q 'DEFAULT_CEILING: Duration = Duration::from_secs(370)' src/relay.rs || { echo "ceiling is no longer 370 s: update requestTimeout" >&2; fail=1; }
 [ "$fail" = 0 ] && echo "plugin manifest matches $v"
 exit "$fail"
