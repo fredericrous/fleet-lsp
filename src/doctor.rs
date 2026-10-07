@@ -30,7 +30,7 @@ pub(crate) fn run(json: bool) -> (String, u8) {
         .map(|mut r| {
             if r.lang == Lang::Go && r.verdict == Verdict::Verified {
                 // stderr: progress is not the report.
-                eprintln!("fleet-lsp: building gopls (first run only, about a minute)");
+                eprintln!("fleet-lsp: checking that gopls builds (the first run builds it: about a minute)");
                 resolve::warm_gopls(&mut r);
             }
             r

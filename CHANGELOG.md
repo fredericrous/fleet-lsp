@@ -16,8 +16,8 @@ Go's gopls is pinned per repository.
   project's `go` line; a `toolchain` line is not read); `-modfile cannot
   run with vendor/` or `go.work`; `<dir> is ignored by git`; `gopls build
   failed: <error>`.
-- `doctor` builds gopls (`building gopls (first run only, …)` on stderr),
-  so the first session does not wait on the build.
+- `doctor` builds gopls (`checking that gopls builds …` on stderr; only
+  the first run builds), so the first session does not wait on the build.
 - **`--json`: the `compatible` verdict is gone**; verdicts are `verified`
   and `refused`. `doctor` exits 0 only when every language is verified.
 - The Go server's `startupTimeout` is 210 s: twice a cold gopls build
