@@ -424,7 +424,8 @@ with the upgrade command, instead of running a mismatched pair.
   gets the workspace-did-not-load error, `warning` → answered plus one
   `window/showMessage`; fake sends `workspace/configuration` before ready →
   answered within 1 s; held request cancelled → its trailing `didChange`
-  reaches the fake within 100 ms; **fake alive but not reading stdin** while
+  reaches the fake within 1 s (same-step release: core unit test
+  `cancel_of_a_held_request_answers_it_and_frees_what_was_behind`); **fake alive but not reading stdin** while
   a 20 MiB `didOpen` is sent → teardown within 36 s, exit 1, fake gone;
   **client not reading stdout** while the fake floods diagnostics →
   teardown within 36 s; **fake reading stdin slowly (1 MiB/s) while
@@ -474,7 +475,7 @@ sessions via `--plugin-dir`, official LSP plugins off for the session):
 - Integration, all observed: held request answered at ≥ 1.8 s with a 2 s
   readiness delay, `didChange` after it; `workspace/configuration` reply
   delivered within 1 s with `logLevel` rewritten to Information; cancel →
-  -32800 and the trailing `didChange` within 500 ms; `FLEET_LSP_CEILING_MS=2000`
+  -32800 and the trailing `didChange` within the asserted 1 s; `FLEET_LSP_CEILING_MS=2000`
   → error at ~2 s reading "after 2s"; shutdown+exit → 0, fake reaped;
   stdin EOF and SIGTERM while held → fake gone < 6 s; fake exiting on its
   own → "the server exited", exit 1; server not reading → torn down at
