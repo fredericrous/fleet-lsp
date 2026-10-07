@@ -283,6 +283,11 @@ Observed 2026-10-07:
   - No `.adr.yaml` (the rule cannot resolve there, the pin still holds):
     agent-console, ticket-vision, grid, governance-ts, duro-lexical-multi.
 
+## Implementation review
+
+- fleet-lsp 0.2.0 (Phase 1): round 1 approve-with-changes (64k, 65 s) — 6 findings, all fixed in 4df69b0: rollback pins the plugin too, Node probe an input (tests no longer skip), refusals for missing/failing node and missing/unreadable pyproject, `holds-until:` on `engines_floor`, integration-test substitution stated. Delta: approve (34k, 17 s), no new findings.
+- Hand checks after the delta: `doctor` with no `node` on PATH → `node is not on PATH`; with a `node` that exits 3 → `<path> --version failed`; tag v0.1.0 carries plugin.json 0.1.0. Next: 🧑 release 0.2.0.
+
 ## Outcome
 
 <!-- panel: repos=fleet-lsp,decisions,duro-app,authelia-oidc-operator,homelab reviewers=backend,architect,po,lang:go,lang:typescript,lang:python,react,ui-design,ux-research,game-ux body-sha=5c9210e5f402 -->
