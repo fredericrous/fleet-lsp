@@ -1,0 +1,47 @@
+[package]
+name = "fleet-lsp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/fredericrous/fleet-lsp"
+authors = ["Frederic Rousseau"]
+description = "Pinned, ready language servers for Claude Code's LSP tool"
+readme = "README.md"
+keywords = ["lsp", "language-server", "claude-code", "rust-analyzer", "pyright"]
+categories = ["development-tools", "command-line-utilities"]
+
+# MEASURED against `cargo +<v> check --locked`, not inherited and not guessed.
+rust-version = "1.74"
+
+[[bin]]
+name = "fleet-lsp"
+path = "src/main.rs"
+
+# NO DEPENDENCIES (change.dependency-bar). fleet-lsp sits on every byte
+# between Claude Code and a language server; what it links is what a reviewer
+# has to trust. The protocol it needs — Content-Length framing, a top-level
+# JSON scan, one re-serialised `initialize` — is small enough to own, and
+# `scripts/check-no-deps.sh` keeps a convenience crate from arriving later.
+# Argument parsing is hand-rolled for the same reason: a few fixed argv
+# shapes, invoked by a plugin manifest (deviation from the
+# cli.basics.parse-with-a-library heuristic, argued in the README).
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+# The aval subset: real defects, not style. `unwrap_used`/`expect_used` are
+# absent on purpose — the tests use them by design and CI runs `-D warnings`.
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+
+[profile.release]
+strip = true
+opt-level = "s"
+lto = true

@@ -1,0 +1,287 @@
+name: Release
+
+# A pushed `v*` tag is the release (release.trigger): binaries for the four
+# targets the tap installs, checksums, a GitHub release, the tap formula,
+# a real `brew install`, and last the `release` branch the plugin marketplace
+# reads — so a plugin never reaches a session before its binary can.
+
+on:
+  push:
+    tags: ["v*"]
+  # A dry run of an existing or future tag; and the way to resume a release
+  # whose later jobs were not yet armed (the first tap publish).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (no tag ref = dry run, nothing published)"
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The tag and the manifest must agree BEFORE anything is built: a rejected
+  # commit followed by `git tag` tags the OLD head.
+  guard:
+    name: the tag says what the manifest says
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      dry_run: ${{ steps.v.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -euo pipefail
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            dry=false
+          else
+            tag="${{ inputs.tag }}"
+            tag="${tag#v}"
+            [ -n "$tag" ] || tag="$manifest"
+            dry=true
+          fi
+          echo "manifest=$manifest tag=$tag dry_run=$dry"
+          if [ "$manifest" != "$tag" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $manifest."
+            exit 1
+          fi
+          ./scripts/check-plugin.sh
+          if ! awk -v ver="v$manifest" '$1 == "##" && $2 == ver { found = 1 } END { exit !found }' CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## v$manifest' section."
+            exit 1
+          fi
+          echo "version=$manifest" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Exactly the four url/sha pairs the tap formula carries.
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            packages: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - name: Install cross-compilation packages
+        if: matrix.packages != ''
+        timeout-minutes: 12
+        run: |
+          set -uo pipefail
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
+          attempt() {
+            # shellcheck disable=SC2086
+            sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y ${{ matrix.packages }}
+          }
+          if timeout 300 bash -c "$(declare -f attempt); attempt"; then exit 0; fi
+          echo "::warning::the default apt mirror did not answer — falling back to archive.ubuntu.com"
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://archive.ubuntu.com/ubuntu\tpriority:1\n' | sudo tee /etc/apt/apt-mirrors.txt
+          fi
+          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          timeout 300 bash -c "$(declare -f attempt); attempt"
+      - name: Point cargo at the cross linker
+        if: matrix.linker != ''
+        run: |
+          target_upper=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          echo "CARGO_TARGET_${target_upper}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }} --bin fleet-lsp
+      - name: Archive
+        id: archive
+        run: |
+          set -euo pipefail
+          name="fleet-lsp-${{ needs.guard.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp README.md LICENSE "dist/$name/"
+          cp "target/${{ matrix.target }}/release/fleet-lsp" "dist/$name/"
+          (cd dist && tar czf "$name.tar.gz" "$name")
+          echo "asset=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+      # The packaged artifact runs: what tests never touch.
+      - name: The packaged binary runs
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        run: |
+          set -euo pipefail
+          bin="dist/fleet-lsp-${{ needs.guard.outputs.version }}-${{ matrix.target }}/fleet-lsp"
+          "$bin" --help | grep -q 'serve'
+          "$bin" --version | grep -qx "fleet-lsp ${{ needs.guard.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.archive.outputs.asset }}
+          if-no-files-found: error
+
+  # Checksums for every run, dry or not. No write access here.
+  checksums:
+    name: checksums
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          set -euo pipefail
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+      - name: Which channels are armed
+        run: |
+          {
+            echo "### ${{ needs.guard.outputs.dry_run == 'true' && 'Dry run — nothing published' || 'Publication channels' }}"
+            echo
+            echo "| channel | armed | needs |"
+            echo "|---|---|---|"
+            echo "| GitHub release | ${{ needs.guard.outputs.dry_run == 'true' && 'NO (dry run)' || 'yes' }} | a \`v*\` tag |"
+            echo "| homebrew tap | ${{ vars.PUBLISH_TAP == 'true' && 'yes' || 'NO' }} | \`PUBLISH_TAP\` + \`TAP_DEPLOY_KEY\` in the \`release\` environment + a seeded \`Formula/fleet-lsp.rb\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The irreversible step: only for a tag, and write access only inside the
+  # `release` environment, which only `v*` tags may use.
+  publish:
+    name: publish the release
+    needs: [guard, checksums]
+    if: needs.guard.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists — refreshing its assets"
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            notes=$(mktemp)
+            awk -v ver="${GITHUB_REF_NAME}" '
+              $1 == "##" && $2 == ver { grab = 1; next }
+              $1 == "##" && grab      { exit }
+              grab                    { print }
+            ' CHANGELOG.md > "$notes"
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes-file "$notes" dist/*
+          fi
+
+  # The tap formula, from the PUBLISHED checksums. The deploy key is this
+  # repository's own (not aval's), held by the `release` environment, which
+  # only `v*` tags may use.
+  publish-tap:
+    name: publish to the homebrew tap
+    needs: [guard, publish]
+    if: github.ref_type == 'tag' && vars.PUBLISH_TAP == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "v$VERSION" --pattern SHA256SUMS
+      - name: Clone the tap
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "::error::TAP_DEPLOY_KEY is not set in the release environment."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          echo "GIT_SSH_COMMAND=ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes" >> "$GITHUB_ENV"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes" \
+            git clone --depth 1 git@github.com:fredericrous/homebrew-tap.git tap
+      - name: Rewrite the formula
+        run: |
+          set -euo pipefail
+          python3 scripts/bump-tap.py "$VERSION" SHA256SUMS tap/Formula/fleet-lsp.rb
+          ruby -c tap/Formula/fleet-lsp.rb
+      - name: Push
+        run: |
+          set -euo pipefail
+          cd tap
+          if git diff --quiet; then
+            echo "the tap already carries $VERSION"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/fleet-lsp.rb
+          git commit -m "chore: fleet-lsp $VERSION"
+          git push origin HEAD
+
+  # The only thing that runs the formula: what a stranger sees.
+  verify-brew:
+    name: brew can install what was published
+    needs: [guard, publish-tap]
+    if: github.ref_type == 'tag' && vars.PUBLISH_TAP == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - run: |
+          set -euo pipefail
+          brew tap fredericrous/tap
+          brew install fredericrous/tap/fleet-lsp
+          fleet-lsp --version | tee /tmp/v
+          grep -qx "fleet-lsp $VERSION" /tmp/v
+          brew test fredericrous/tap/fleet-lsp
+
+  # Last: the plugin marketplace reads the `release` branch, so it moves only
+  # once the binary it requires is installable. A fast-forward, never a
+  # force-push and never a push to main.
+  release-branch:
+    name: the plugin follows the release
+    needs: [guard, verify-brew]
+    if: github.ref_type == 'tag' && vars.PUBLISH_TAP == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          set -euo pipefail
+          git push origin "${GITHUB_SHA}:refs/heads/release"
+          echo "### release branch → ${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
