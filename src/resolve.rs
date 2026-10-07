@@ -164,7 +164,7 @@ pub(crate) fn resolve(lang: Lang, start: &Path) -> Resolution {
         Lang::Rust => rust(git, root),
         Lang::Go => go(git, root),
         Lang::Python => python(git, root),
-        Lang::TypeScript => typescript(git, root),
+        Lang::TypeScript => typescript(git, root, node_on_path),
     }
 }
 
@@ -636,12 +636,28 @@ fn python(git: PathBuf, root: PathBuf) -> Resolution {
             fix,
         )
     };
-    let pyproject = fs::read_to_string(root.join("pyproject.toml")).unwrap_or_default();
+    let pyproject = match fs::read_to_string(root.join("pyproject.toml")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return refused(
+                "no pyproject.toml".into(),
+                Fix::None("pin pyright in a uv project's pyproject.toml".into()),
+            )
+        }
+        Err(e) => {
+            return refused(
+                format!("cannot read pyproject.toml: {e}"),
+                Fix::None("make pyproject.toml readable".into()),
+            )
+        }
+    };
     let installed = venv_pyright(&root);
     let Some(pinned) = pyright_pin(&pyproject) else {
         // `uv add` needs a `[project]` table; without one the usual fix
         // cannot work, so say what the project is instead.
-        let is_uv_project = pyproject.lines().any(|l| l.trim() == "[project]");
+        let is_uv_project = pyproject
+            .lines()
+            .any(|l| l.split('#').next().unwrap_or_default().trim() == "[project]");
         if !is_uv_project {
             return refused(
                 "not a uv project (no [project] table)".into(),
@@ -769,7 +785,7 @@ fn uv_lock_version(root: &Path, package: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- typescript
 
-fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
+fn typescript(git: PathBuf, root: PathBuf, node: impl FnOnce() -> Node) -> Resolution {
     let refused = |reason: String, fix: Fix| {
         Resolution::refused(
             Lang::TypeScript,
@@ -875,16 +891,24 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
             .and_then(|n| n.as_str())
             .map(str::to_string)
     });
-    let node_version = which("node")
-        .and_then(|n| first_line(&n, &["--version"]))
-        .map(|v| v.trim_start_matches('v').to_string());
-    let Some(node_version) = node_version else {
-        let mut r = refused(
-            "node is not installed".into(),
-            Fix::None("install Node".into()),
-        );
-        r.pin = Some(pin);
-        return r;
+    let node_version = match node() {
+        Node::Version(v) => v,
+        Node::NotOnPath => {
+            let mut r = refused(
+                "node is not on PATH".into(),
+                Fix::None("install Node".into()),
+            );
+            r.pin = Some(pin);
+            return r;
+        }
+        Node::Failed(path) => {
+            let mut r = refused(
+                format!("{} --version failed", path.display()),
+                Fix::None(format!("run {} --version to see why", path.display())),
+            );
+            r.pin = Some(pin);
+            return r;
+        }
     };
     if let Some(min) = node_min.as_deref().and_then(engines_floor) {
         if !version_ge(&node_version, &min) {
@@ -930,6 +954,24 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
     }
 }
 
+/// The `node` the adapter's `.bin` shim will run.
+#[derive(Debug, Clone, PartialEq)]
+enum Node {
+    NotOnPath,
+    Failed(PathBuf),
+    Version(String),
+}
+
+fn node_on_path() -> Node {
+    let Some(path) = which("node") else {
+        return Node::NotOnPath;
+    };
+    match first_line(&path, &["--version"]) {
+        Some(v) if v.starts_with('v') => Node::Version(v.trim_start_matches('v').to_string()),
+        _ => Node::Failed(path),
+    }
+}
+
 /// The adapter fleet-lsp runs from each repository's own node_modules.
 const ADAPTER: &str = "typescript-language-server";
 
@@ -954,13 +996,17 @@ fn read_package_json(path: &Path) -> Option<crate::json::Json> {
 
 /// The floor of an `engines` range: only a leading `>=X[.Y[.Z]]` is read;
 /// any other form is not enforced (`doctor` still prints the Node version).
+// holds-until: the adapter's `engines.node` stays a plain `>=X.Y.Z` (6.0.1:
+// `>=22.22.2`); a range with `||` or `^` needs a real semver range parser.
 pub(crate) fn engines_floor(range: &str) -> Option<String> {
-    let v = range.trim().strip_prefix(">=")?.trim();
-    let v: String = v
+    let v: String = range
+        .trim()
+        .strip_prefix(">=")?
+        .trim()
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.')
         .collect();
-    (!v.is_empty() && !v.contains(' ')).then_some(v)
+    (!v.is_empty()).then_some(v)
 }
 
 /// The version a lockfile resolves for the package named exactly `name`.
@@ -1437,6 +1483,15 @@ mod tests {
         t
     }
 
+    /// Resolves `t` as a TypeScript project with `node` as the PATH Node.
+    fn ts_with(t: &Tree, node: Node) -> Resolution {
+        typescript(t.p(""), t.p(""), move || node)
+    }
+
+    fn node(v: &str) -> Node {
+        Node::Version(v.into())
+    }
+
     fn refusal(r: &Resolution) -> (String, Fix) {
         match &r.verdict {
             Verdict::Refused { reason, fix } => (reason.clone(), fix.clone()),
@@ -1447,10 +1502,7 @@ mod tests {
     #[test]
     fn adapter_comes_from_the_repository_and_is_verified() {
         let t = ts_project("ts-ok", Some("6.0.1"), Some("6.0.1"), ">=1.0.0");
-        let r = resolve(Lang::TypeScript, &t.p(""));
-        if which("node").is_none() {
-            return; // the Node check needs a node on PATH
-        }
+        let r = ts_with(&t, node("24.14.0"));
         assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
         let spawn = r.spawn.unwrap();
         assert_eq!(
@@ -1458,16 +1510,13 @@ mod tests {
             t.p("node_modules/.bin/typescript-language-server")
         );
         assert!(!r.narrowed);
-        assert!(r.version.unwrap().contains("adapter 6.0.1, node "));
+        assert_eq!(r.version.unwrap(), "5.9.3 (adapter 6.0.1, node 24.14.0)");
     }
 
     #[test]
     fn unmeasured_adapter_is_verified_but_narrowed() {
         let t = ts_project("ts-602", Some("6.0.2"), Some("6.0.2"), ">=1.0.0");
-        let r = resolve(Lang::TypeScript, &t.p(""));
-        if which("node").is_none() {
-            return;
-        }
+        let r = ts_with(&t, node("24.14.0"));
         assert_eq!(r.verdict, Verdict::Verified);
         assert!(r.narrowed);
         assert_eq!(r.barrier, Barrier::None);
@@ -1476,7 +1525,7 @@ mod tests {
     #[test]
     fn refusal_adapter_not_pinned() {
         let t = ts_project("ts-nopin", None, None, ">=1.0.0");
-        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        let (reason, fix) = refusal(&ts_with(&t, node("24.14.0")));
         assert_eq!(reason, "typescript-language-server is not pinned");
         assert_eq!(
             fix,
@@ -1488,7 +1537,7 @@ mod tests {
             .file("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n")
             .file("pnpm-lock.yaml", "importers:\n\n  .:\n    devDependencies:\n      typescript:\n        specifier: ^5.9.3\n        version: 5.9.3\n")
             .file("node_modules/typescript/package.json", "{\"version\":\"5.9.3\"}");
-        let (_, fix) = refusal(&resolve(Lang::TypeScript, &w.p("")));
+        let (_, fix) = refusal(&ts_with(&w, node("24.14.0")));
         assert_eq!(
             fix,
             Fix::Command("pnpm add -D -E -w typescript-language-server@6.0.1".into())
@@ -1498,7 +1547,7 @@ mod tests {
     #[test]
     fn refusal_adapter_stale() {
         let t = ts_project("ts-stale", Some("6.0.1"), Some("6.0.0"), ">=1.0.0");
-        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        let (reason, fix) = refusal(&ts_with(&t, node("24.14.0")));
         assert_eq!(
             reason,
             "stale node_modules: typescript-language-server 6.0.0, pinned 6.0.1"
@@ -1509,24 +1558,44 @@ mod tests {
     #[test]
     fn refusal_adapter_pinned_but_not_installed() {
         let t = ts_project("ts-noinst", Some("6.0.1"), None, ">=1.0.0");
-        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        let (reason, fix) = refusal(&ts_with(&t, node("24.14.0")));
         assert_eq!(reason, "typescript-language-server is not installed");
         assert_eq!(fix, Fix::Command("npm ci".into()));
     }
 
     #[test]
     fn refusal_node_too_old() {
-        let t = ts_project("ts-node", Some("6.0.1"), Some("6.0.1"), ">=999.0.0");
-        if which("node").is_none() {
-            return;
-        }
-        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
-        assert!(
-            reason.starts_with("node ")
-                && reason.ends_with("is older than typescript-language-server needs (>=999.0.0)"),
-            "{reason}"
+        let t = ts_project("ts-node", Some("6.0.1"), Some("6.0.1"), ">=22.22.2");
+        let (reason, fix) = refusal(&ts_with(&t, node("22.11.0")));
+        assert_eq!(
+            reason,
+            "node 22.11.0 is older than typescript-language-server needs (>=22.22.2)"
         );
         assert_eq!(fix, Fix::None("upgrade Node".into()));
+        assert_eq!(ts_with(&t, node("22.22.2")).verdict, Verdict::Verified);
+    }
+
+    #[test]
+    fn refusal_node_missing_or_failing() {
+        let t = ts_project("ts-nonode", Some("6.0.1"), Some("6.0.1"), ">=22.22.2");
+        let (reason, fix) = refusal(&ts_with(&t, Node::NotOnPath));
+        assert_eq!(reason, "node is not on PATH");
+        assert_eq!(fix, Fix::None("install Node".into()));
+        let (reason, fix) = refusal(&ts_with(&t, Node::Failed("/x/node".into())));
+        assert_eq!(reason, "/x/node --version failed");
+        assert_eq!(fix, Fix::None("run /x/node --version to see why".into()));
+    }
+
+    #[test]
+    fn refusal_python_pyproject_missing() {
+        let t = Tree::new("py-nofile");
+        t.file(".venv/pyvenv.cfg", "home = /usr/bin\n");
+        let (reason, fix) = refusal(&python(t.p(""), t.p("")));
+        assert_eq!(reason, "no pyproject.toml");
+        assert_eq!(
+            fix,
+            Fix::None("pin pyright in a uv project's pyproject.toml".into())
+        );
     }
 
     #[test]
@@ -1536,6 +1605,11 @@ mod tests {
             "pyproject.toml",
             "[tool.pytest.ini_options]\naddopts = \"-q\"\n",
         );
+        // A commented `[project]` header is still a uv project.
+        let c = Tree::new("py-commented");
+        c.file("pyproject.toml", "[project]  # the app\nname = \"x\"\n");
+        let (reason, _) = refusal(&python(c.p(""), c.p("")));
+        assert_eq!(reason, "no pyright==<version> in pyproject.toml");
         let (reason, fix) = refusal(&resolve(Lang::Python, &t.p("")));
         assert_eq!(reason, "not a uv project (no [project] table)");
         assert_eq!(

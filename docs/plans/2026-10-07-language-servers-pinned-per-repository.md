@@ -183,6 +183,16 @@ constant bumped, then the repositories in one batch.
   `refused` in a session log under `~/.local/state/fleet-lsp/` within 7
   days, in a repository `doctor` verified on release day, other than
   `stale node_modules` (which the person fixes with an install).
+- 2026-10-07 — Implementation review: the plugin passes `--min-version`
+  equal to its release, so a downgraded binary alone is refused. Rollback
+  also pins the plugin: set the `fleet-lsp` marketplace `ref` to the
+  previous tag (`v0.1.0` carries its own marketplace and plugin) and
+  update the plugin. "0.1.0 keeps working on pinned repositories" holds
+  with the 0.1.0 plugin, i.e. until the release. The Node probe is an
+  input to the TypeScript resolver, so its tests run without a `node` on
+  PATH. The "fake PATH adapter never spawned" check is a unit test on the
+  spawn program, not an integration test: the resolver never looks the
+  adapter up on PATH, so there is no PATH lookup for a fake to win.
 
 ## Verification
 
