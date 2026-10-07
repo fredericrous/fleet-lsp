@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/language-servers-pinned
 repos: [fleet-lsp, decisions, agent-console, application-landscape, customer-vision, duro-app, duro-design-system, duro-lexical-multi, governance-ts, grid, kb-vision, social-planner, ticket-vision, website-builder, vault-transit-unseal-operator, authelia-oidc-operator, homelab-preview-operator, ddns-updater-operator, duro-operator, cluster-vision, amont-pack-homelab, homelab]
 adrs: [ADR-0019, ADR-0020, ADR-0012]
@@ -161,8 +161,8 @@ constant bumped, then the repositories in one batch.
       cold gopls build and set `startupTimeout`.
 - [x] Phase 6 — 8 Go PRs (`aval add` refresh, tools module, doctor
       0.3.0-local exit 0 `verified`, CI green).
-- [ ] 🧑 decision: release fleet-lsp 0.3.0.
-- [ ] Phase 7 — release 0.3.0, `brew upgrade`; remove `~/go/bin/gopls`;
+- [x] 🧑 decision: release fleet-lsp 0.3.0.
+- [x] Phase 7 — release 0.3.0, `brew upgrade`; remove `~/go/bin/gopls`;
       `which gopls` must find nothing.
 
 ## Decision log
@@ -352,6 +352,17 @@ Observed 2026-10-07:
   `copy/` in .gitignore → `copy is ignored by git`; an empty `.git` with no repository
   above it
   → `git check-ignore failed: …`, never "not ignored".
+- Phase 7 (2026-10-07, the person chose release + Phase 7): v0.3.0 tagged
+  on 686929b; release run 37622707027 `success`, every job green; the
+  release carries the four tarballs and SHA256SUMS; the `release` branch's
+  plugin.json is 0.3.0 with the Go `startupTimeout` 210000. `brew upgrade`
+  → `fleet-lsp 0.3.0`; plugin 0.2.0 → 0.3.0. `~/go/bin/gopls` (v0.23.0)
+  removed → `which gopls` finds nothing. Doctor loop → 10/11 module roots
+  `go verified v0.23.0 (go 1.27.1)`; duro-operator's live checkout holds
+  the person's uncommitted work and predates the pin (`gopls is not
+  pinned`), verified on origin/main. Live, released binary and plugin:
+  fresh `claude -p` in authelia-oidc-operator, `incomingCalls
+  assembler.go:30` → 3 callers via `tools/go.mod`.
 
 ## Implementation review
 
@@ -361,5 +372,16 @@ Observed 2026-10-07:
 - Delta: approve (33k, 28 s); its low wording note fixed here. Deliberate: `compatible` removed without a prior-minor warning — SemVer 0.x (ADR-0012), stated in plan and CHANGELOG. Next: 🧑 release 0.3.0.
 
 ## Outcome
+
+Every active TypeScript (12) and Go (8) repository pins its language
+server, and fleet-lsp runs only those pins: 0.2.0 (TypeScript adapter from
+`node_modules`) and 0.3.0 (gopls from `tools/go.mod` under
+`GOTOOLCHAIN=local`) are released, and the machine's global
+`typescript-language-server` and `gopls` are gone. The rule is
+`toolchain.language-servers-pinned` (decisions #44). Upstream fixes it took:
+amont 1.47.1 (go-vet/go-test skip a module with no package) and the
+operators' controller-gen paths. The 7-day watch (no `refused` other than
+`stale node_modules` in repos verified on release day) runs to 2026-10-14;
+a trigger means the rollback in the Decision log.
 
 <!-- panel: repos=fleet-lsp,decisions,duro-app,authelia-oidc-operator,homelab reviewers=backend,architect,po,lang:go,lang:typescript,lang:python,react,ui-design,ux-research,game-ux body-sha=5c9210e5f402 -->
