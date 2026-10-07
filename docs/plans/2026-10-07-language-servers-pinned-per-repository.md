@@ -349,13 +349,16 @@ Observed 2026-10-07:
   → answered 11; the log shows git root `homelab`, project root
   `wasm/subsonic-auth`, pin `tools/go.mod … v0.23.0`, verdict verified.
 - Ignored root, real git (after the review): a `git init` tree with
-  `copy/` in .gitignore → `copy is ignored by git`; an unreadable `.git`
+  `copy/` in .gitignore → `copy is ignored by git`; an empty `.git` with no repository
+  above it
   → `git check-ignore failed: …`, never "not ignored".
 
 ## Implementation review
 
 - fleet-lsp 0.2.0 (Phase 1): round 1 approve-with-changes (64k, 65 s) — 6 findings, all fixed in 4df69b0: rollback pins the plugin too, Node probe an input (tests no longer skip), refusals for missing/failing node and missing/unreadable pyproject, `holds-until:` on `engines_floor`, integration-test substitution stated. Delta: approve (34k, 17 s), no new findings.
 - Hand checks after the delta: `doctor` with no `node` on PATH → `node is not on PATH`; with a `node` that exits 3 → `<path> --version failed`; tag v0.1.0 carries plugin.json 0.1.0. Next: 🧑 release 0.2.0.
+- fleet-lsp 0.3.0 (Phases 5–6): round 1 approve-with-changes (65k, 69 s) — 6 findings, all fixed in d003a95/68f6885: git check-ignore failures refused by name (three-valued probe) with a real-git test; subsonic-auth live answer recorded (11 = 11); build fix keeps `GOTOOLCHAIN=local`; CI Go pinned 1.27.1; plan Behaviour matches code.
+- Delta: approve (33k, 28 s); its low wording note fixed here. Deliberate: `compatible` removed without a prior-minor warning — SemVer 0.x (ADR-0012), stated in plan and CHANGELOG. Next: 🧑 release 0.3.0.
 
 ## Outcome
 
