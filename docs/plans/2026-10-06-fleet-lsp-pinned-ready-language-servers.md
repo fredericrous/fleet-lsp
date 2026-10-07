@@ -313,7 +313,7 @@ with the upgrade command, instead of running a mismatched pair.
       `aarch64-unknown-linux-gnu`); a **separate** homebrew-tap deploy key in
       a `release` environment limited to `v*` tags; the `release`-branch
       fast-forward.
-- [ ] 🧑 decision: cut v0.1.0 (`work.release-on-request`)? Seed
+- [x] 🧑 decision: cut v0.1.0 (`work.release-on-request`)? Seed
       `Formula/fleet-lsp.rb` by hand, then set `PUBLISH_TAP` and re-run the
       release on `v0.1.0` by `workflow_dispatch` so `publish-tap`,
       `verify-brew` and the first `release` fast-forward run; `gh run view
@@ -496,9 +496,32 @@ sessions via `--plugin-dir`, official LSP plugins off for the session):
   exit 1; sre-agent pyright 1.1.411 verified; duro-app TypeScript 5.9.3
   verified (adapter 6.0.1); authelia gopls v0.23.0 compatible (go1.27.1 ≥
   1.25.12); widest line 75; `--json` parses.
-- Not yet observed (need the release): CI on GitHub, the release run,
-  `brew install`, the fresh plugin install resolving the tag commit, and
-  Phase 6.
+- CI on GitHub (PR #1, head 4155d1a): ADR, deps, msrv, rust ubuntu-latest
+  and macos-latest all `success` (the macOS job first failed the
+  slow-reader test on fixed-time waits; fixed before merge).
+
+Observed 2026-10-07, release (person's decision: merge + release now):
+
+- Armed first: `release` environment limited to `v*` tags; a fleet-lsp-only
+  write deploy key on homebrew-tap stored as its `TAP_DEPLOY_KEY` (local
+  copy deleted); `Formula/fleet-lsp.rb` seeded (homebrew-tap #7, 65ef2c9);
+  `PUBLISH_TAP=true`. So the tag run did everything; no `workflow_dispatch`
+  re-run was needed.
+- PR #1 squash-merged as 892a7ae; tag `v0.1.0` → 892a7ae; its canonical
+  tree ced8a245e703 is the last reviewed one.
+- Release run 37554317076: every job `success` — guard, the four targets,
+  checksums, publish, publish-tap, verify-brew, release-branch.
+- GitHub release v0.1.0 carries the four archives and SHA256SUMS; the tap
+  formula reads version 0.1.0 with its four sha256 equal to SHA256SUMS;
+  `origin/release` = 892a7ae = `v0.1.0^{commit}`, so a fresh plugin install
+  reads the tag commit.
+- On this machine: `brew install fredericrous/tap/fleet-lsp` →
+  `/usr/local/bin/fleet-lsp`, `fleet-lsp 0.1.0`; `fleet-lsp doctor` exit 0
+  in relais (rust 1.94.1 verified) and in authelia-oidc-operator (gopls
+  compatible) — the gate for Phase 6 (b).
+- Not yet observed: Phase 6 after `chezmoi apply` (a fresh session
+  installing fleet-lsp@fleet-lsp from the release ref and answering with
+  the official plugins off).
 
 ## Implementation review
 
