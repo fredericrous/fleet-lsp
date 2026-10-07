@@ -318,7 +318,7 @@ with the upgrade command, instead of running a mismatched pair.
       release on `v0.1.0` by `workflow_dispatch` so `publish-tap`,
       `verify-brew` and the first `release` fast-forward run; `gh run view
       --json conclusion` must read `success`.
-- [ ] Phase 6 — dotfiles, on PR #17's branch (pointer plan there), two
+- [x] Phase 6 — dotfiles, on PR #17's branch (pointer plan there), two
       commits: (a) Brewfile `fredericrous/tap/fleet-lsp` +
       `typescript-language-server`, `extraKnownMarketplaces` fleet-lsp;
       (b) once `fleet-lsp doctor` exits 0 in relais and
@@ -525,9 +525,18 @@ Observed 2026-10-07, release (person's decision: merge + release now):
   `/usr/local/bin/fleet-lsp`, `fleet-lsp 0.1.0`; `fleet-lsp doctor` exit 0
   in relais (rust 1.94.1 verified) and in authelia-oidc-operator (gopls
   compatible) — the gate for Phase 6 (b).
-- Not yet observed: Phase 6 after `chezmoi apply` (a fresh session
-  installing fleet-lsp@fleet-lsp from the release ref and answering with
-  the official plugins off).
+- Phase 6 (dotfiles#17, merged as 4c9a40c with a merge commit so the
+  rollback commit d2180b2 stays revertable): applied here — agents and
+  Brewfile by `chezmoi apply`, settings patched by hand to keep the
+  machine's local `"model"` line; `fleet-lsp@fleet-lsp` 0.1.0 installed
+  from the `release` ref, enabled, official LSP plugins off. Fresh
+  sessions, no flags: relais `incomingCalls resume.rs:169` → the 7 callers
+  incl. `reconcile_run main.rs`; authelia `incomingCalls assembler.go:30` →
+  the 3 callers; each session wrote its own fleet-lsp log.
+- Not as planned: the Brewfile's `typescript-language-server` has no bottle
+  for this Intel Mac; `brew install` spent 4.5 h compiling its dependency
+  chain (cmake, then node) and was stopped. The adapter fleet-lsp verified
+  is the npm-installed 6.0.1, which stays until that line is settled.
 
 ## Implementation review
 
