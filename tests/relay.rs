@@ -401,12 +401,16 @@ fn cancelling_a_held_request_releases_the_notification_behind_it() {
         .recv_until(Duration::from_secs(5), |b| b.contains(r#""id":7"#))
         .unwrap();
     assert!(body.contains("-32800"), "{body}");
+    // The gate never opens here, so any delivery proves the cancel released
+    // the notification; the same-step release is the core unit test's.
+    // This bound is end to end through a Python fake and a polled file,
+    // which a shared macOS runner cannot hold to 100 ms.
     assert!(
-        wait_for(&fx, "didChange", Duration::from_millis(100)),
+        wait_for(&fx, "didChange", Duration::from_secs(1)),
         "{:?}",
         fx.event_lines()
     );
-    assert!(t.elapsed() < Duration::from_secs(1));
+    assert!(t.elapsed() < Duration::from_secs(2));
 }
 
 #[test]

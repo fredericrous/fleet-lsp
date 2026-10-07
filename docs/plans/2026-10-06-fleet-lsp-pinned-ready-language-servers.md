@@ -382,6 +382,15 @@ with the upgrade command, instead of running a mismatched pair.
   missed once on a saturated macos-latest runner while a heavy test ran
   beside it; the bound stays, the overlap goes.
 
+- 2026-10-07 — The cancel integration test's window goes from 100 ms to
+  1 s. macos-latest missed 100 ms again with no heavy test beside it
+  (dotfiles-era PR #3 run 37579094602): the end-to-end path — fleet-lsp,
+  a Python fake, an event file polled every 20 ms — exceeds it on a shared
+  runner. What the 100 ms stood for is proven where timing is exact: the
+  core unit test releases the trailing notification in the same step as
+  the cancel; and with the gate never opening, any delivery at all proves
+  the release.
+
 ## Verification
 
 - Phase 0: `docs/readiness.md` holds, per server/version, the observed
