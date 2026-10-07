@@ -502,8 +502,9 @@ fn rustc_stable() -> Option<String> {
 /// What the resolver needs from the machine for Go, probed once.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GoProbe {
-    /// git ignores the project root (a stale copy inside another repository).
-    pub(crate) ignored: bool,
+    /// Whether git ignores the project root (a stale copy inside another
+    /// repository), or why git could not say.
+    pub(crate) ignored: Result<bool, String>,
     /// The `go` on PATH, or `None` if there is none.
     pub(crate) bin: Option<PathBuf>,
     /// `go env GOVERSION` under `GOTOOLCHAIN=local`, without the `go` prefix.
@@ -516,14 +517,28 @@ pub(crate) struct GoProbe {
 const GOPLS_PIN: &str = "v0.23.0";
 
 fn go_probe(git: &Path, root: &Path) -> GoProbe {
-    let ignored = root != git
-        && Command::new("git")
+    let ignored = if root == git {
+        Ok(false)
+    } else {
+        // `check-ignore -q`: 0 ignored, 1 not ignored, anything else fatal.
+        let out = Command::new("git")
             .arg("-C")
             .arg(git)
             .args(["check-ignore", "-q", "--"])
             .arg(rel_to(root, git))
-            .status()
-            .is_ok_and(|s| s.success());
+            .output();
+        match out {
+            Ok(o) if o.status.code() == Some(0) => Ok(true),
+            Ok(o) if o.status.code() == Some(1) => Ok(false),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .next()
+                .unwrap_or("no output")
+                .trim()
+                .to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
     let bin = which("go");
     let go_env = |var: &str| -> Option<String> {
         let out = Command::new(bin.as_ref()?)
@@ -552,11 +567,23 @@ fn go(git: PathBuf, root: PathBuf, probe: impl FnOnce(&Path, &Path) -> GoProbe) 
         Resolution::refused(Lang::Go, Some(git.clone()), Some(root.clone()), reason, fix)
     };
     let p = probe(&git, &root);
-    if p.ignored {
-        return refused(
-            format!("{} is ignored by git", rel_to(&root, &git)),
-            Fix::None("open the real repository".into()),
-        );
+    match p.ignored {
+        Ok(false) => {}
+        Ok(true) => {
+            return refused(
+                format!("{} is ignored by git", rel_to(&root, &git)),
+                Fix::None("open the real repository".into()),
+            )
+        }
+        Err(why) => {
+            return refused(
+                format!("git check-ignore failed: {why}"),
+                Fix::None(format!(
+                    "run git check-ignore {} to see why",
+                    rel_to(&root, &git)
+                )),
+            )
+        }
     }
     let Some(go_bin) = p.bin else {
         return refused(
@@ -709,7 +736,7 @@ pub(crate) fn warm_gopls(r: &mut Resolution) {
     r.verdict = Verdict::Refused {
         reason: format!("gopls build failed: {failure}"),
         fix: Fix::Command(format!(
-            "cd {} && go build -o /dev/null golang.org/x/tools/gopls",
+            "cd {} && GOTOOLCHAIN=local go build -o /dev/null golang.org/x/tools/gopls",
             dir.display()
         )),
     };
@@ -1761,7 +1788,7 @@ mod tests {
 
     fn probe(version: &str) -> GoProbe {
         GoProbe {
-            ignored: false,
+            ignored: Ok(false),
             bin: Some("/x/go".into()),
             version: Some(version.into()),
             gowork: None,
@@ -1882,7 +1909,7 @@ mod tests {
         t.file("copy/go.mod", "module op\n\ngo 1.25.0\n")
             .file("tools/go.mod", TOOLS_GOMOD);
         let mut p = probe("1.27.1");
-        p.ignored = true;
+        p.ignored = Ok(true);
         let (reason, fix) = refusal(&go_with(&t, "copy", p));
         assert_eq!(reason, "copy is ignored by git");
         assert_eq!(fix, Fix::None("open the real repository".into()));
@@ -1891,6 +1918,35 @@ mod tests {
         let (reason, fix) = refusal(&go_with(&t, "copy", p));
         assert_eq!(reason, "go is not installed");
         assert_eq!(fix, Fix::Command("brew install go".into()));
+    }
+
+    #[test]
+    fn real_git_check_ignore_decides_the_ignored_root() {
+        let t = Tree::new("go-ign-real");
+        fs::remove_dir_all(t.p(".git")).unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(t.p(""))
+            .status()
+            .unwrap();
+        assert!(init.success());
+        // A directory-only pattern, matched against a path without a slash.
+        t.file(".gitignore", "copy/\n")
+            .file("copy/go.mod", "module op\n\ngo 1.25.0\n")
+            .file("real/go.mod", "module op\n\ngo 1.25.0\n");
+        assert_eq!(go_probe(&t.p(""), &t.p("copy")).ignored, Ok(true));
+        assert_eq!(go_probe(&t.p(""), &t.p("real")).ignored, Ok(false));
+        assert_eq!(go_probe(&t.p(""), &t.p("")).ignored, Ok(false));
+        let (reason, _) = refusal(&go(t.p(""), t.p("copy"), go_probe));
+        assert_eq!(reason, "copy is ignored by git");
+        // A `.git` git cannot read is a failure named, not "not ignored".
+        let broken = Tree::new("go-ign-broken");
+        broken.file("sub/go.mod", "module op\n");
+        let got = go_probe(&broken.p(""), &broken.p("sub")).ignored;
+        assert!(matches!(&got, Err(e) if !e.is_empty()), "{got:?}");
+        let (reason, fix) = refusal(&go(broken.p(""), broken.p("sub"), go_probe));
+        assert!(reason.starts_with("git check-ignore failed: "), "{reason}");
+        assert_eq!(fix, Fix::None("run git check-ignore sub to see why".into()));
     }
 
     #[test]
@@ -1969,7 +2025,7 @@ mod tests {
         assert_eq!(
             fix,
             Fix::Command(format!(
-                "cd {} && go build -o /dev/null golang.org/x/tools/gopls",
+                "cd {} && GOTOOLCHAIN=local go build -o /dev/null golang.org/x/tools/gopls",
                 t.p("tools").display()
             ))
         );
