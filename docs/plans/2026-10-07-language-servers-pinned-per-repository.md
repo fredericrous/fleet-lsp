@@ -143,10 +143,10 @@ constant bumped, then the repositories in one batch.
 
 ## Phases
 
-- [ ] Phase 1 — fleet-lsp 0.2.0 TypeScript (branch): adapter from
+- [x] Phase 1 — fleet-lsp 0.2.0 TypeScript (branch): adapter from
       node_modules, exact-name lockfile lookup, Node check, refusal texts,
       README/CHANGELOG; live checks incl. TypeScript 6.0.3.
-- [ ] Phase 2 — the rule in `decisions` (one PR).
+- [x] Phase 2 — the rule in `decisions` (one PR).
 - [ ] Phase 3 — 12 TypeScript PRs (`aval add` refresh, devDependency,
       checks above, doctor 0.2.0-local exit 0 `verified (adapter 6.0.1)`,
       CI green).
@@ -218,6 +218,29 @@ constant bumped, then the repositories in one batch.
 - 7 days after each release: no `refused` (other than `stale
   node_modules`) in session logs for the repositories verified on release
   day — else rollback.
+
+Observed 2026-10-07:
+- Phase 1: `make check` — 97 unit + 20 integration tests, clippy clean, no
+  dependencies, msrv 1.74, plugin manifest 0.2.0. New unit tests: exact-name
+  lockfile lookups in pnpm/package-lock/yarn/bun with both packages; adapter
+  verified from `node_modules/.bin` (spawn program asserted — PATH is not
+  read at all); 6.0.2 → verified + narrowed; not pinned / not installed /
+  stale / Node too old / Python not a uv project — one test per refusal
+  text. Found while testing: pnpm's root-importer lookup never worked (a
+  blank line after `importers:` reset it; the unique-version fallback hid
+  it) — fixed. Live (0.2.0 debug build first on PATH, duro-app worktree
+  pinned): `doctor` → `typescript verified 5.9.3 (adapter 6.0.1, node
+  24.14.0)`, exit 0; the unpinned live checkout → `refused`, `typescript-
+  language-server is not pinned`, exit 1; a fresh `claude -p`
+  `incomingCalls useCopyFeedback.ts:9` → 8 callers, served by
+  `duro-app-wt-tsls/node_modules/.bin/typescript-language-server`, gate
+  open. The TypeScript 6.0.3 live check (social-planner) runs when that
+  repository is pinned in Phase 3.
+- Phase 2: decisions branch `feat/language-servers-pinned` — `aval check`
+  → 27 records, no findings; `aval rule toolchain.language-servers-pinned`
+  → constraint, adopts ADR-0019, active. Implementation review: approve-
+  with-changes (source line, gopls exception, broker role) → fixed; delta
+  approve-with-changes (record this here) → this entry.
 
 ## Outcome
 
