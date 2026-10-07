@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.0
+
+TypeScript's adapter is pinned per repository.
+
+- The adapter is `typescript-language-server` from the repository's own
+  `node_modules/.bin`, verified against its lockfile entry (an exact
+  devDependency at the workspace root). The PATH copy is no longer used.
+  Not pinned → `fix: npm install -D -E typescript-language-server@6.0.1`
+  (pnpm workspace: `pnpm add -D -E -w …`); installed ≠ locked → the
+  lockfile's install command.
+- Node: the adapter's `.bin` shim runs PATH `node`; a Node older than the
+  adapter's `engines.node` floor is refused. `doctor` prints the Node
+  version.
+- Lockfile lookups match package names exactly; pnpm's root importer is
+  read past the blank lines pnpm writes (it fell back before).
+- Python: a pyproject.toml without a `[project]` table is refused as `not a
+  uv project` instead of suggesting a `uv add` that cannot work.
+- The plugin requires fleet-lsp 0.2.0.
+
 ## v0.1.0
 
 First release.

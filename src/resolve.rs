@@ -639,6 +639,15 @@ fn python(git: PathBuf, root: PathBuf) -> Resolution {
     let pyproject = fs::read_to_string(root.join("pyproject.toml")).unwrap_or_default();
     let installed = venv_pyright(&root);
     let Some(pinned) = pyright_pin(&pyproject) else {
+        // `uv add` needs a `[project]` table; without one the usual fix
+        // cannot work, so say what the project is instead.
+        let is_uv_project = pyproject.lines().any(|l| l.trim() == "[project]");
+        if !is_uv_project {
+            return refused(
+                "not a uv project (no [project] table)".into(),
+                Fix::None("not a uv project (no [project] table)".into()),
+            );
+        }
         let v = installed.unwrap_or_else(|| PYRIGHT_MEASURED.to_string());
         return refused(
             "no pyright==<version> in pyproject.toml".into(),
@@ -792,7 +801,7 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
     };
     let lock = lock.expect("matched Some above");
     let lock_text = fs::read_to_string(root.join(lock)).unwrap_or_default();
-    let Some(pinned) = lockfile_typescript(lock, &lock_text) else {
+    let Some(pinned) = lockfile_version(lock, &lock_text, "typescript") else {
         return refused(
             format!("{lock} has no typescript"),
             Fix::None("add typescript as a dev dependency".into()),
@@ -824,19 +833,72 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
         r.version = Some(installed);
         return r;
     }
-    // holds-until: the repository pins typescript-language-server. Until then
-    // the adapter comes from PATH (installed by the Brewfile); the TypeScript
-    // that answers is still the repository's, checked by the gate against the
-    // adapter's own selection report.
-    let Some(adapter) = which("typescript-language-server") else {
+    let adapter_pin = lockfile_version(lock, &lock_text, ADAPTER);
+    let Some(adapter_pinned) = adapter_pin else {
         let mut r = refused(
-            "typescript-language-server is not installed".into(),
-            Fix::Command("brew install typescript-language-server".into()),
+            format!("{ADAPTER} is not pinned"),
+            Fix::Command(adapter_add_command(lock, &root)),
         );
         r.pin = Some(pin);
         return r;
     };
-    let adapter_version = first_line(&adapter, &["--version"]).unwrap_or_default();
+    let pin = format!("{pin}, {ADAPTER} {adapter_pinned}");
+    let adapter_pkg =
+        read_package_json(&root.join("node_modules").join(ADAPTER).join("package.json"));
+    let adapter_version = adapter_pkg.as_ref().and_then(|j| {
+        j.get("version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
+    let adapter = root.join("node_modules/.bin").join(ADAPTER);
+    let Some(adapter_version) = adapter_version.filter(|_| adapter.exists()) else {
+        let mut r = refused(
+            format!("{ADAPTER} is not installed"),
+            Fix::Command(install.into()),
+        );
+        r.pin = Some(pin);
+        return r;
+    };
+    if adapter_version != adapter_pinned {
+        let mut r = refused(
+            format!("stale node_modules: {ADAPTER} {adapter_version}, pinned {adapter_pinned}"),
+            Fix::Command(install.into()),
+        );
+        r.pin = Some(pin);
+        r.version = Some(adapter_version);
+        return r;
+    }
+    // The `.bin` shim runs whatever `node` is on PATH.
+    let node_min = adapter_pkg.as_ref().and_then(|j| {
+        j.get("engines")
+            .and_then(|e| e.get("node"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+    });
+    let node_version = which("node")
+        .and_then(|n| first_line(&n, &["--version"]))
+        .map(|v| v.trim_start_matches('v').to_string());
+    let Some(node_version) = node_version else {
+        let mut r = refused(
+            "node is not installed".into(),
+            Fix::None("install Node".into()),
+        );
+        r.pin = Some(pin);
+        return r;
+    };
+    if let Some(min) = node_min.as_deref().and_then(engines_floor) {
+        if !version_ge(&node_version, &min) {
+            let mut r = refused(
+                format!(
+                    "node {node_version} is older than {ADAPTER} needs ({})",
+                    node_min.as_deref().unwrap_or_default()
+                ),
+                Fix::None("upgrade Node".into()),
+            );
+            r.pin = Some(pin);
+            return r;
+        }
+    }
     let lib = root.join("node_modules/typescript/lib");
     let measured = adapter_version == TS_ADAPTER_MEASURED;
     Resolution {
@@ -845,7 +907,9 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
         project_root: Some(root.clone()),
         pin: Some(pin),
         server: Some(adapter.clone()),
-        version: Some(format!("{installed} (adapter {adapter_version})")),
+        version: Some(format!(
+            "{installed} (adapter {adapter_version}, node {node_version})"
+        )),
         verdict: Verdict::Verified,
         spawn: Some(Spawn {
             program: adapter,
@@ -866,7 +930,41 @@ fn typescript(git: PathBuf, root: PathBuf) -> Resolution {
     }
 }
 
-pub(crate) fn lockfile_typescript(kind: &str, text: &str) -> Option<String> {
+/// The adapter fleet-lsp runs from each repository's own node_modules.
+const ADAPTER: &str = "typescript-language-server";
+
+/// The command that pins the measured adapter, for the package manager the
+/// lockfile belongs to.
+fn adapter_add_command(lock: &str, root: &Path) -> String {
+    let spec = format!("{ADAPTER}@{TS_ADAPTER_MEASURED}");
+    match lock {
+        "pnpm-lock.yaml" if root.join("pnpm-workspace.yaml").exists() => {
+            format!("pnpm add -D -E -w {spec}")
+        }
+        "pnpm-lock.yaml" => format!("pnpm add -D -E {spec}"),
+        "yarn.lock" => format!("yarn add -D -E {spec}"),
+        "bun.lock" => format!("bun add -d --exact {spec}"),
+        _ => format!("npm install -D -E {spec}"),
+    }
+}
+
+fn read_package_json(path: &Path) -> Option<crate::json::Json> {
+    crate::json::parse(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// The floor of an `engines` range: only a leading `>=X[.Y[.Z]]` is read;
+/// any other form is not enforced (`doctor` still prints the Node version).
+pub(crate) fn engines_floor(range: &str) -> Option<String> {
+    let v = range.trim().strip_prefix(">=")?.trim();
+    let v: String = v
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    (!v.is_empty() && !v.contains(' ')).then_some(v)
+}
+
+/// The version a lockfile resolves for the package named exactly `name`.
+pub(crate) fn lockfile_version(kind: &str, text: &str, name: &str) -> Option<String> {
     let strip = |v: &str| {
         v.trim()
             .trim_matches(|c| c == '"' || c == '\'')
@@ -877,17 +975,22 @@ pub(crate) fn lockfile_typescript(kind: &str, text: &str) -> Option<String> {
     };
     match kind {
         "package-lock.json" => {
-            let at = text.find("\"node_modules/typescript\": {")?;
+            let at = text.find(&format!("\"node_modules/{name}\": {{"))?;
             let rest = &text[at..];
             let v = rest.find("\"version\":").map(|i| &rest[i + 10..])?;
             Some(strip(v.split(',').next()?))
         }
         "pnpm-lock.yaml" => {
             // The root importer's resolved version first.
+            let key = format!("{name}:");
             let mut in_importers = false;
             let mut in_root = false;
             let mut lines = text.lines().peekable();
             while let Some(l) = lines.next() {
+                // pnpm separates entries with blank lines; they end nothing.
+                if l.trim().is_empty() {
+                    continue;
+                }
                 if !l.starts_with(' ') {
                     in_importers = l.trim_end() == "importers:";
                     continue;
@@ -896,7 +999,7 @@ pub(crate) fn lockfile_typescript(kind: &str, text: &str) -> Option<String> {
                     in_root = l.trim() == ".:" || l.trim() == "'.':";
                     continue;
                 }
-                if in_importers && in_root && l.trim() == "typescript:" {
+                if in_importers && in_root && l.trim() == key {
                     for next in lines.by_ref().take(3) {
                         if let Some(v) = next.trim().strip_prefix("version:") {
                             return Some(strip(v));
@@ -904,9 +1007,10 @@ pub(crate) fn lockfile_typescript(kind: &str, text: &str) -> Option<String> {
                     }
                 }
             }
+            let prefix = format!("  {name}@");
             let mut versions: Vec<String> = text
                 .lines()
-                .filter_map(|l| l.strip_prefix("  typescript@"))
+                .filter_map(|l| l.strip_prefix(prefix.as_str()))
                 .map(|v| strip(v.trim_end_matches([':', '{', '}', ' '])))
                 .collect();
             versions.sort();
@@ -914,11 +1018,12 @@ pub(crate) fn lockfile_typescript(kind: &str, text: &str) -> Option<String> {
             (versions.len() == 1).then(|| versions.remove(0))
         }
         "yarn.lock" => {
+            let prefix = format!("{name}@");
             let mut versions = Vec::new();
             let mut lines = text.lines();
             while let Some(l) = lines.next() {
                 let key = l.trim_start_matches('"');
-                if !l.starts_with(' ') && key.starts_with("typescript@") {
+                if !l.starts_with(' ') && key.starts_with(&prefix) {
                     for next in lines.by_ref().take(4) {
                         let n = next.trim();
                         if let Some(v) = n
@@ -936,9 +1041,10 @@ pub(crate) fn lockfile_typescript(kind: &str, text: &str) -> Option<String> {
             (versions.len() == 1).then(|| versions.remove(0))
         }
         _ => {
-            // bun.lock: "typescript": ["typescript@5.9.3", …]
-            let at = text.find("\"typescript@")?;
-            let v = &text[at + 12..];
+            // bun.lock: "<name>": ["<name>@5.9.3", …]
+            let needle = format!("\"{name}@");
+            let at = text.find(&needle)?;
+            let v = &text[at + needle.len()..];
             Some(strip(v.split('"').next()?))
         }
     }
@@ -1246,16 +1352,201 @@ mod tests {
     }
 
     #[test]
-    fn lockfile_typescript_versions() {
-        let pnpm = "lockfileVersion: '9.0'\nimporters:\n\n  .:\n    devDependencies:\n      typescript:\n        specifier: ^5.9.3\n        version: 5.9.3\n\n  apps/web:\n    devDependencies:\n      typescript:\n        specifier: ^5.0.0\n        version: 5.0.4\npackages:\n\n  typescript@5.9.3:\n";
+    fn lockfile_versions_match_exact_names() {
+        let pnpm = "lockfileVersion: '9.0'\nimporters:\n\n  .:\n    devDependencies:\n      typescript:\n        specifier: ^5.9.3\n        version: 5.9.3\n      typescript-language-server:\n        specifier: 6.0.1\n        version: 6.0.1\n\n  apps/web:\n    devDependencies:\n      typescript:\n        specifier: ^5.0.0\n        version: 5.0.4\npackages:\n\n  typescript-language-server@6.0.1:\n\n  typescript@5.9.3:\n";
         assert_eq!(
-            lockfile_typescript("pnpm-lock.yaml", pnpm),
+            lockfile_version("pnpm-lock.yaml", pnpm, "typescript"),
             Some("5.9.3".into())
         );
-        let yarn = "\"typescript@^5.9.2\":\n  version \"5.9.3\"\n  resolved \"x\"\n";
-        assert_eq!(lockfile_typescript("yarn.lock", yarn), Some("5.9.3".into()));
-        let bun = "{ \"packages\": { \"typescript\": [\"typescript@5.9.3\", \"\", {}] } }";
-        assert_eq!(lockfile_typescript("bun.lock", bun), Some("5.9.3".into()));
+        assert_eq!(
+            lockfile_version("pnpm-lock.yaml", pnpm, ADAPTER),
+            Some("6.0.1".into())
+        );
+        let npm = "{\"packages\":{\"node_modules/typescript-language-server\": {\n \"version\": \"6.0.1\",\n},\"node_modules/typescript\": {\n \"version\": \"5.9.3\",\n}}}";
+        assert_eq!(
+            lockfile_version("package-lock.json", npm, "typescript"),
+            Some("5.9.3".into())
+        );
+        assert_eq!(
+            lockfile_version("package-lock.json", npm, ADAPTER),
+            Some("6.0.1".into())
+        );
+        let yarn = "\"typescript-language-server@6.0.1\":\n  version \"6.0.1\"\n\n\"typescript@^5.9.2\":\n  version \"5.9.3\"\n  resolved \"x\"\n";
+        assert_eq!(
+            lockfile_version("yarn.lock", yarn, "typescript"),
+            Some("5.9.3".into())
+        );
+        assert_eq!(
+            lockfile_version("yarn.lock", yarn, ADAPTER),
+            Some("6.0.1".into())
+        );
+        let bun = "{ \"packages\": { \"typescript-language-server\": [\"typescript-language-server@6.0.1\", \"\", {}], \"typescript\": [\"typescript@5.9.3\", \"\", {}] } }";
+        assert_eq!(
+            lockfile_version("bun.lock", bun, "typescript"),
+            Some("5.9.3".into())
+        );
+        assert_eq!(
+            lockfile_version("bun.lock", bun, ADAPTER),
+            Some("6.0.1".into())
+        );
+        assert_eq!(lockfile_version("package-lock.json", "{}", ADAPTER), None);
+    }
+
+    #[test]
+    fn engines_floor_reads_only_a_leading_minimum() {
+        assert_eq!(engines_floor(">=22.22.2"), Some("22.22.2".into()));
+        assert_eq!(engines_floor(" >= 18"), Some("18".into()));
+        assert_eq!(engines_floor("^22 || ^24"), None);
+        assert_eq!(engines_floor("22.x"), None);
+    }
+
+    /// A TypeScript project with typescript 5.9.3 and the adapter at
+    /// `adapter_locked` in its package-lock, installed at `adapter_installed`.
+    fn ts_project(
+        name: &str,
+        adapter_locked: Option<&str>,
+        adapter_installed: Option<&str>,
+        node_engines: &str,
+    ) -> Tree {
+        let t = Tree::new(name);
+        let mut lock = String::from(
+            "{\"packages\":{\"node_modules/typescript\": {\n \"version\": \"5.9.3\",\n}",
+        );
+        if let Some(v) = adapter_locked {
+            lock.push_str(&format!(
+                ",\"node_modules/typescript-language-server\": {{\n \"version\": \"{v}\",\n}}"
+            ));
+        }
+        lock.push_str("}}");
+        t.file("package.json", "{}")
+            .file("package-lock.json", &lock)
+            .file(
+                "node_modules/typescript/package.json",
+                "{\"version\":\"5.9.3\"}",
+            );
+        if let Some(v) = adapter_installed {
+            t.file(
+                "node_modules/typescript-language-server/package.json",
+                &format!("{{\"version\":\"{v}\",\"engines\":{{\"node\":\"{node_engines}\"}}}}"),
+            )
+            .file(
+                "node_modules/.bin/typescript-language-server",
+                "#!/bin/sh\n",
+            );
+        }
+        t
+    }
+
+    fn refusal(r: &Resolution) -> (String, Fix) {
+        match &r.verdict {
+            Verdict::Refused { reason, fix } => (reason.clone(), fix.clone()),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_comes_from_the_repository_and_is_verified() {
+        let t = ts_project("ts-ok", Some("6.0.1"), Some("6.0.1"), ">=1.0.0");
+        let r = resolve(Lang::TypeScript, &t.p(""));
+        if which("node").is_none() {
+            return; // the Node check needs a node on PATH
+        }
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        let spawn = r.spawn.unwrap();
+        assert_eq!(
+            spawn.program,
+            t.p("node_modules/.bin/typescript-language-server")
+        );
+        assert!(!r.narrowed);
+        assert!(r.version.unwrap().contains("adapter 6.0.1, node "));
+    }
+
+    #[test]
+    fn unmeasured_adapter_is_verified_but_narrowed() {
+        let t = ts_project("ts-602", Some("6.0.2"), Some("6.0.2"), ">=1.0.0");
+        let r = resolve(Lang::TypeScript, &t.p(""));
+        if which("node").is_none() {
+            return;
+        }
+        assert_eq!(r.verdict, Verdict::Verified);
+        assert!(r.narrowed);
+        assert_eq!(r.barrier, Barrier::None);
+    }
+
+    #[test]
+    fn refusal_adapter_not_pinned() {
+        let t = ts_project("ts-nopin", None, None, ">=1.0.0");
+        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        assert_eq!(reason, "typescript-language-server is not pinned");
+        assert_eq!(
+            fix,
+            Fix::Command("npm install -D -E typescript-language-server@6.0.1".into())
+        );
+        // In a pnpm workspace the fix adds it at the workspace root.
+        let w = Tree::new("ts-nopin-pnpm");
+        w.file("package.json", "{}")
+            .file("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n")
+            .file("pnpm-lock.yaml", "importers:\n\n  .:\n    devDependencies:\n      typescript:\n        specifier: ^5.9.3\n        version: 5.9.3\n")
+            .file("node_modules/typescript/package.json", "{\"version\":\"5.9.3\"}");
+        let (_, fix) = refusal(&resolve(Lang::TypeScript, &w.p("")));
+        assert_eq!(
+            fix,
+            Fix::Command("pnpm add -D -E -w typescript-language-server@6.0.1".into())
+        );
+    }
+
+    #[test]
+    fn refusal_adapter_stale() {
+        let t = ts_project("ts-stale", Some("6.0.1"), Some("6.0.0"), ">=1.0.0");
+        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        assert_eq!(
+            reason,
+            "stale node_modules: typescript-language-server 6.0.0, pinned 6.0.1"
+        );
+        assert_eq!(fix, Fix::Command("npm ci".into()));
+    }
+
+    #[test]
+    fn refusal_adapter_pinned_but_not_installed() {
+        let t = ts_project("ts-noinst", Some("6.0.1"), None, ">=1.0.0");
+        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        assert_eq!(reason, "typescript-language-server is not installed");
+        assert_eq!(fix, Fix::Command("npm ci".into()));
+    }
+
+    #[test]
+    fn refusal_node_too_old() {
+        let t = ts_project("ts-node", Some("6.0.1"), Some("6.0.1"), ">=999.0.0");
+        if which("node").is_none() {
+            return;
+        }
+        let (reason, fix) = refusal(&resolve(Lang::TypeScript, &t.p("")));
+        assert!(
+            reason.starts_with("node ")
+                && reason.ends_with("is older than typescript-language-server needs (>=999.0.0)"),
+            "{reason}"
+        );
+        assert_eq!(fix, Fix::None("upgrade Node".into()));
+    }
+
+    #[test]
+    fn refusal_python_not_a_uv_project() {
+        let t = Tree::new("py-nouv");
+        t.file(
+            "pyproject.toml",
+            "[tool.pytest.ini_options]\naddopts = \"-q\"\n",
+        );
+        let (reason, fix) = refusal(&resolve(Lang::Python, &t.p("")));
+        assert_eq!(reason, "not a uv project (no [project] table)");
+        assert_eq!(
+            fix,
+            Fix::None("not a uv project (no [project] table)".into())
+        );
+        let r = resolve(Lang::Python, &t.p(""));
+        assert_eq!(
+            r.refusal_text().unwrap(),
+            "fleet-lsp: python: not a uv project (no [project] table); fix: none — not a uv project (no [project] table)"
+        );
     }
 
     #[test]
