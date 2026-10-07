@@ -25,9 +25,6 @@ const DOWN_DEPTH: usize = 3;
 pub(crate) enum Verdict {
     /// The installed version equals the pin.
     Verified,
-    /// gopls from PATH, built with a Go new enough for the module: the one
-    /// accepted non-pin (deviation from build.toolchain-source).
-    Compatible,
     Refused {
         reason: String,
         fix: Fix,
@@ -162,7 +159,7 @@ pub(crate) fn resolve(lang: Lang, start: &Path) -> Resolution {
     };
     match lang {
         Lang::Rust => rust(git, root),
-        Lang::Go => go(git, root),
+        Lang::Go => go(git, root, go_probe),
         Lang::Python => python(git, root),
         Lang::TypeScript => typescript(git, root, node_on_path),
     }
@@ -220,6 +217,9 @@ fn walk_down(lang: Lang, dir: &Path, depth: usize, hits: &mut Vec<PathBuf>) {
     if depth > DOWN_DEPTH {
         return;
     }
+    if lang == Lang::Go && is_tools_module(dir) {
+        return;
+    }
     if depth > 0 && has_marker(lang, dir) {
         hits.push(dir.to_path_buf());
         return;
@@ -235,6 +235,13 @@ fn walk_down(lang: Lang, dir: &Path, depth: usize, hits: &mut Vec<PathBuf>) {
     for d in subdirs {
         walk_down(lang, &d, depth + 1, hits);
     }
+}
+
+/// A `tools/` module that only pins tools is not a Go project of its own.
+fn is_tools_module(dir: &Path) -> bool {
+    dir.file_name() == Some("tools".as_ref())
+        && fs::read_to_string(dir.join("go.mod"))
+            .is_ok_and(|t| t.lines().any(|l| l.trim() == "module tools"))
 }
 
 /// A uv or npm/pnpm workspace member resolves to the workspace root, where
@@ -492,94 +499,248 @@ fn rustc_stable() -> Option<String> {
 
 // ---------------------------------------------------------------- go
 
-fn go(git: PathBuf, root: PathBuf) -> Resolution {
+/// What the resolver needs from the machine for Go, probed once.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GoProbe {
+    /// Whether git ignores the project root (a stale copy inside another
+    /// repository), or why git could not say.
+    pub(crate) ignored: Result<bool, String>,
+    /// The `go` on PATH, or `None` if there is none.
+    pub(crate) bin: Option<PathBuf>,
+    /// `go env GOVERSION` under `GOTOOLCHAIN=local`, without the `go` prefix.
+    pub(crate) version: Option<String>,
+    /// `go env GOWORK` in the project root: a go.work in scope.
+    pub(crate) gowork: Option<String>,
+}
+
+/// The pinned gopls fleet-lsp's fix installs.
+const GOPLS_PIN: &str = "v0.23.0";
+
+fn go_probe(git: &Path, root: &Path) -> GoProbe {
+    let ignored = if root == git {
+        Ok(false)
+    } else {
+        // `check-ignore -q`: 0 ignored, 1 not ignored, anything else fatal.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(git)
+            .args(["check-ignore", "-q", "--"])
+            .arg(rel_to(root, git))
+            .output();
+        match out {
+            Ok(o) if o.status.code() == Some(0) => Ok(true),
+            Ok(o) if o.status.code() == Some(1) => Ok(false),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .next()
+                .unwrap_or("no output")
+                .trim()
+                .to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    let bin = which("go");
+    let go_env = |var: &str| -> Option<String> {
+        let out = Command::new(bin.as_ref()?)
+            .args(["env", var])
+            .current_dir(root)
+            .env("GOTOOLCHAIN", "local")
+            .output()
+            .ok()?;
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !v.is_empty() && v != "off").then_some(v)
+    };
+    GoProbe {
+        ignored,
+        version: go_env("GOVERSION").map(|v| v.trim_start_matches("go").to_string()),
+        gowork: go_env("GOWORK"),
+        bin,
+    }
+}
+
+/// gopls runs from the repository's pin, built by the machine's Go under
+/// `GOTOOLCHAIN=local` (a stated deviation from build.toolchain-source): the
+/// `tool` directive in the module's go.mod, or in the nearest `tools/go.mod`
+/// from the project root up to the git root, run with `-modfile`.
+fn go(git: PathBuf, root: PathBuf, probe: impl FnOnce(&Path, &Path) -> GoProbe) -> Resolution {
     let refused = |reason: String, fix: Fix| {
         Resolution::refused(Lang::Go, Some(git.clone()), Some(root.clone()), reason, fix)
     };
-    let Some(go_bin) = which("go") else {
+    let p = probe(&git, &root);
+    match p.ignored {
+        Ok(false) => {}
+        Ok(true) => {
+            return refused(
+                format!("{} is ignored by git", rel_to(&root, &git)),
+                Fix::None("open the real repository".into()),
+            )
+        }
+        Err(why) => {
+            return refused(
+                format!("git check-ignore failed: {why}"),
+                Fix::None(format!(
+                    "run git check-ignore {} to see why",
+                    rel_to(&root, &git)
+                )),
+            )
+        }
+    }
+    let Some(go_bin) = p.bin else {
         return refused(
             "go is not installed".into(),
             Fix::Command("brew install go".into()),
         );
     };
-    let gomod = fs::read_to_string(root.join("go.mod")).unwrap_or_default();
-    let gowork = fs::read_to_string(root.join("go.work")).unwrap_or_default();
-    if has_gopls_tool(&gomod) {
-        let version = first_line(&go_bin, &["tool", "gopls", "version"])
-            .map(|v| v.replace("golang.org/x/tools/gopls ", ""));
-        return Resolution {
-            lang: Lang::Go,
-            git_root: Some(git),
-            project_root: Some(root.clone()),
-            pin: Some("go.mod tool golang.org/x/tools/gopls".into()),
-            server: Some(go_bin.clone()),
-            version,
-            verdict: Verdict::Verified,
-            spawn: Some(Spawn {
-                program: go_bin,
-                args: vec!["tool".into(), "gopls".into()],
-                cwd: root,
-                ..Spawn::default()
-            }),
-            barrier: Barrier::None,
-            narrowed: false,
-            tsserver_path: None,
-        };
-    }
-    let need = go_directive(&gomod).or_else(|| go_directive(&gowork));
-    // holds-until: the repository pins gopls with `tool golang.org/x/tools/gopls`
-    // in go.mod. Until then the PATH gopls is accepted only as `compatible`
-    // (built with a Go at least the module's), a recorded deviation from
-    // build.toolchain-source.
-    let Some(gopls) = which("gopls") else {
+    let Some(local) = p.version else {
         return refused(
-            "no gopls on PATH and no `tool golang.org/x/tools/gopls` in go.mod".into(),
-            Fix::Command("go install golang.org/x/tools/gopls@latest".into()),
+            "go env GOVERSION failed".into(),
+            Fix::None("run go env GOVERSION to see why".into()),
         );
     };
-    let built = first_line(&go_bin, &["version", &gopls.display().to_string()]).and_then(|l| {
-        l.rsplit(' ')
-            .next()
-            .map(|v| v.trim_start_matches("go").to_string())
-    });
-    let version =
-        first_line(&gopls, &["version"]).map(|v| v.replace("golang.org/x/tools/gopls ", ""));
-    let pin = need
-        .as_ref()
-        .map(|n| format!("go.mod go {n} (gopls built with go ≥ it)"));
-    match (&built, &need) {
-        (Some(b), Some(n)) if version_ge(b, n) => Resolution {
-            lang: Lang::Go,
-            git_root: Some(git),
-            project_root: Some(root.clone()),
-            pin,
-            server: Some(gopls.clone()),
-            version: version.map(|v| format!("{v} (go{b})")),
-            verdict: Verdict::Compatible,
-            spawn: Some(Spawn {
-                program: gopls,
-                args: Vec::new(),
-                cwd: root,
-                ..Spawn::default()
-            }),
-            barrier: Barrier::None,
-            narrowed: false,
-            tsserver_path: None,
-        },
-        (Some(b), Some(n)) => {
-            let mut r = refused(
-                format!("gopls was built with go{b}, older than the module's go {n}"),
-                Fix::Command("go install golang.org/x/tools/gopls@latest".into()),
-            );
-            r.pin = pin;
-            r.server = Some(gopls);
-            r
+    let gomod = fs::read_to_string(root.join("go.mod")).unwrap_or_default();
+    let project = if gomod.is_empty() {
+        (
+            "go.work",
+            fs::read_to_string(root.join("go.work")).unwrap_or_default(),
+        )
+    } else {
+        ("go.mod", gomod.clone())
+    };
+    let (pin_file, pin_text, modfile) = if has_gopls_tool(&gomod) {
+        (root.join("go.mod"), gomod, false)
+    } else if let Some((path, text)) = tools_module(&root, &git) {
+        (path, text, true)
+    } else {
+        return refused(
+            "gopls is not pinned".into(),
+            Fix::Command(format!(
+                "mkdir -p tools && cd tools && go mod init tools && go get -tool golang.org/x/tools/gopls@{GOPLS_PIN}"
+            )),
+        );
+    };
+    let pin_rel = rel_to(&pin_file, &git);
+    if modfile {
+        let without = |what: &str| {
+            refused(
+                format!("-modfile cannot run with {what}"),
+                Fix::None("pin gopls in go.mod instead".into()),
+            )
+        };
+        if root.join("vendor").is_dir() {
+            return without("vendor/");
         }
-        _ => refused(
-            "could not read the module's go version or gopls's build version".into(),
-            Fix::None("go.mod needs a `go` line".into()),
-        ),
+        if p.gowork.is_some() {
+            return without("go.work");
+        }
     }
+    // Only the `go` line counts: `GOTOOLCHAIN=local` ignores a `toolchain` line.
+    let mut floors = vec![(pin_rel.clone(), go_directive(&pin_text))];
+    if modfile {
+        floors.push((project.0.to_string(), go_directive(&project.1)));
+    }
+    for (file, floor) in floors {
+        if let Some(w) = floor.filter(|w| !version_ge(&local, w)) {
+            return refused(
+                format!("go {local} is older than {file}'s go {w}"),
+                Fix::None("upgrade Go".into()),
+            );
+        }
+    }
+    let gopls_version = required_version(&pin_text, "golang.org/x/tools/gopls");
+    let mut args: Vec<OsString> = vec!["tool".into()];
+    if modfile {
+        let mut flag = OsString::from("-modfile=");
+        flag.push(&pin_file);
+        args.push(flag);
+    }
+    args.push("gopls".into());
+    Resolution {
+        lang: Lang::Go,
+        git_root: Some(git),
+        project_root: Some(root.clone()),
+        pin: Some(format!(
+            "{pin_rel} tool golang.org/x/tools/gopls {}",
+            gopls_version
+                .as_deref()
+                .unwrap_or("(version not in require)")
+        )),
+        server: Some(go_bin.clone()),
+        version: Some(format!(
+            "{} (go {local})",
+            gopls_version.as_deref().unwrap_or("gopls")
+        )),
+        verdict: Verdict::Verified,
+        spawn: Some(Spawn {
+            program: go_bin,
+            args,
+            cwd: root,
+            env_set: vec![("GOTOOLCHAIN".into(), "local".into())],
+            env_remove: Vec::new(),
+        }),
+        barrier: Barrier::None,
+        narrowed: false,
+        tsserver_path: None,
+    }
+}
+
+/// The nearest `tools/go.mod` with a gopls `tool` line, from `root` up to `git`.
+fn tools_module(root: &Path, git: &Path) -> Option<(PathBuf, String)> {
+    root.ancestors()
+        .take_while(|d| d.starts_with(git))
+        .map(|d| d.join("tools/go.mod"))
+        .find_map(|p| {
+            let text = fs::read_to_string(&p).ok()?;
+            has_gopls_tool(&text).then_some((p, text))
+        })
+}
+
+/// The version a go.mod requires for `module`, directly or in a block.
+fn required_version(gomod: &str, module: &str) -> Option<String> {
+    gomod.lines().find_map(|l| {
+        let l = l.trim();
+        let l = l.strip_prefix("require ").unwrap_or(l);
+        let rest = l.strip_prefix(module)?.strip_prefix(' ')?;
+        rest.split_whitespace().next().map(str::to_string)
+    })
+}
+
+/// Builds gopls through the resolved spawn, so a session never waits on the
+/// first build. A build that fails turns the resolution into a refusal.
+pub(crate) fn warm_gopls(r: &mut Resolution) {
+    let Some(spawn) = r.spawn.as_ref().filter(|_| r.lang == Lang::Go) else {
+        return;
+    };
+    let mut cmd = Command::new(&spawn.program);
+    cmd.args(&spawn.args).arg("version").current_dir(&spawn.cwd);
+    for (k, v) in &spawn.env_set {
+        cmd.env(k, v);
+    }
+    let failure = match cmd.output() {
+        Ok(out) if out.status.success() => return,
+        Ok(out) => String::from_utf8_lossy(&out.stderr)
+            .lines()
+            // `# <package>` heads the compiler's errors; the error follows.
+            .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .unwrap_or("no output")
+            .trim()
+            .to_string(),
+        Err(e) => e.to_string(),
+    };
+    let dir = spawn
+        .args
+        .iter()
+        .find_map(|a| a.to_str()?.strip_prefix("-modfile="))
+        .and_then(|m| Path::new(m).parent())
+        .unwrap_or(&spawn.cwd)
+        .to_path_buf();
+    r.verdict = Verdict::Refused {
+        reason: format!("gopls build failed: {failure}"),
+        fix: Fix::Command(format!(
+            "cd {} && GOTOOLCHAIN=local go build -o /dev/null golang.org/x/tools/gopls",
+            dir.display()
+        )),
+    };
+    r.spawn = None;
 }
 
 fn has_gopls_tool(gomod: &str) -> bool {
@@ -1621,6 +1782,254 @@ mod tests {
             r.refusal_text().unwrap(),
             "fleet-lsp: python: not a uv project (no [project] table); fix: none — not a uv project (no [project] table)"
         );
+    }
+
+    const TOOLS_GOMOD: &str = "module tools\n\ngo 1.26.0\n\ntool golang.org/x/tools/gopls\n\nrequire (\n\tgithub.com/x/y v1.0.0 // indirect\n\tgolang.org/x/tools/gopls v0.23.0\n)\n";
+
+    fn probe(version: &str) -> GoProbe {
+        GoProbe {
+            ignored: Ok(false),
+            bin: Some("/x/go".into()),
+            version: Some(version.into()),
+            gowork: None,
+        }
+    }
+
+    /// Resolves `start` in `t` as Go with `p` as the machine.
+    fn go_with(t: &Tree, start: &str, p: GoProbe) -> Resolution {
+        let root = match root_of(Lang::Go, t, start) {
+            Ok(r) => r,
+            Err(e) => panic!("no single Go root: {e:?}"),
+        };
+        go(t.p(""), root, move |_, _| p)
+    }
+
+    #[test]
+    fn gopls_from_the_tools_module_with_modfile_and_local_toolchain() {
+        let t = Tree::new("go-tools");
+        t.file("go.mod", "module op\n\ngo 1.25.0\n\ntoolchain go1.99.0\n")
+            .file("tools/go.mod", TOOLS_GOMOD);
+        let r = go_with(&t, "", probe("1.27.1"));
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(
+            r.pin.as_deref(),
+            Some("tools/go.mod tool golang.org/x/tools/gopls v0.23.0")
+        );
+        assert_eq!(r.version.as_deref(), Some("v0.23.0 (go 1.27.1)"));
+        let spawn = r.spawn.unwrap();
+        assert_eq!(spawn.program, PathBuf::from("/x/go"));
+        let modfile = format!("-modfile={}", t.p("tools/go.mod").display());
+        assert_eq!(
+            spawn.args,
+            vec![OsString::from("tool"), modfile.into(), "gopls".into()]
+        );
+        assert_eq!(spawn.env_set, vec![("GOTOOLCHAIN".into(), "local".into())]);
+        assert_eq!(spawn.cwd, t.p(""));
+    }
+
+    #[test]
+    fn nested_module_shares_the_tools_module_at_the_git_root() {
+        let t = Tree::new("go-nested");
+        t.file("tools/go.mod", TOOLS_GOMOD)
+            .file("wasm/auth/go.mod", "module auth\n\ngo 1.22.12\n");
+        let r = go_with(&t, "wasm/auth", probe("1.27.1"));
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(r.project_root, Some(t.p("wasm/auth")));
+        assert!(r.pin.unwrap().starts_with("tools/go.mod "));
+        // From the git root, the tools module is not a project of its own.
+        assert_eq!(root_of(Lang::Go, &t, ""), Ok(t.p("wasm/auth")));
+    }
+
+    #[test]
+    fn gopls_in_the_module_go_mod_runs_without_modfile() {
+        let t = Tree::new("go-inline");
+        t.file(
+            "go.mod",
+            "module op\n\ngo 1.25.0\n\ntool golang.org/x/tools/gopls\n\nrequire golang.org/x/tools/gopls v0.23.0\n",
+        );
+        let r = go_with(&t, "", probe("1.27.1"));
+        assert_eq!(r.verdict, Verdict::Verified);
+        assert_eq!(
+            r.pin.as_deref(),
+            Some("go.mod tool golang.org/x/tools/gopls v0.23.0")
+        );
+        let spawn = r.spawn.unwrap();
+        assert_eq!(spawn.args, vec![OsString::from("tool"), "gopls".into()]);
+        assert_eq!(spawn.env_set, vec![("GOTOOLCHAIN".into(), "local".into())]);
+    }
+
+    #[test]
+    fn refusal_gopls_not_pinned() {
+        let t = Tree::new("go-nopin");
+        t.file("go.mod", "module op\n\ngo 1.25.0\n");
+        let (reason, fix) = refusal(&go_with(&t, "", probe("1.27.1")));
+        assert_eq!(reason, "gopls is not pinned");
+        assert_eq!(
+            fix,
+            Fix::Command("mkdir -p tools && cd tools && go mod init tools && go get -tool golang.org/x/tools/gopls@v0.23.0".into())
+        );
+    }
+
+    #[test]
+    fn refusal_local_go_older_than_either_go_line() {
+        let t = Tree::new("go-old");
+        t.file("go.mod", "module op\n\ngo 1.25.0\n")
+            .file("tools/go.mod", TOOLS_GOMOD);
+        let (reason, fix) = refusal(&go_with(&t, "", probe("1.25.3")));
+        assert_eq!(reason, "go 1.25.3 is older than tools/go.mod's go 1.26.0");
+        assert_eq!(fix, Fix::None("upgrade Go".into()));
+        let u = Tree::new("go-old-project");
+        u.file("go.mod", "module op\n\ngo 1.28.0\n")
+            .file("tools/go.mod", TOOLS_GOMOD);
+        let (reason, _) = refusal(&go_with(&u, "", probe("1.27.1")));
+        assert_eq!(reason, "go 1.27.1 is older than go.mod's go 1.28.0");
+    }
+
+    #[test]
+    fn refusal_modfile_with_vendor_or_go_work() {
+        let t = Tree::new("go-vendor");
+        t.file("go.mod", "module op\n\ngo 1.25.0\n")
+            .file("vendor/modules.txt", "")
+            .file("tools/go.mod", TOOLS_GOMOD);
+        let (reason, fix) = refusal(&go_with(&t, "", probe("1.27.1")));
+        assert_eq!(reason, "-modfile cannot run with vendor/");
+        assert_eq!(fix, Fix::None("pin gopls in go.mod instead".into()));
+        let w = Tree::new("go-work");
+        w.file("go.mod", "module op\n\ngo 1.25.0\n")
+            .file("tools/go.mod", TOOLS_GOMOD);
+        let mut p = probe("1.27.1");
+        p.gowork = Some("/elsewhere/go.work".into());
+        let (reason, _) = refusal(&go_with(&w, "", p));
+        assert_eq!(reason, "-modfile cannot run with go.work");
+    }
+
+    #[test]
+    fn refusal_ignored_root_and_missing_go() {
+        let t = Tree::new("go-ign");
+        t.file("copy/go.mod", "module op\n\ngo 1.25.0\n")
+            .file("tools/go.mod", TOOLS_GOMOD);
+        let mut p = probe("1.27.1");
+        p.ignored = Ok(true);
+        let (reason, fix) = refusal(&go_with(&t, "copy", p));
+        assert_eq!(reason, "copy is ignored by git");
+        assert_eq!(fix, Fix::None("open the real repository".into()));
+        let mut p = probe("1.27.1");
+        p.bin = None;
+        let (reason, fix) = refusal(&go_with(&t, "copy", p));
+        assert_eq!(reason, "go is not installed");
+        assert_eq!(fix, Fix::Command("brew install go".into()));
+    }
+
+    #[test]
+    fn real_git_check_ignore_decides_the_ignored_root() {
+        let t = Tree::new("go-ign-real");
+        fs::remove_dir_all(t.p(".git")).unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(t.p(""))
+            .status()
+            .unwrap();
+        assert!(init.success());
+        // A directory-only pattern, matched against a path without a slash.
+        t.file(".gitignore", "copy/\n")
+            .file("copy/go.mod", "module op\n\ngo 1.25.0\n")
+            .file("real/go.mod", "module op\n\ngo 1.25.0\n");
+        assert_eq!(go_probe(&t.p(""), &t.p("copy")).ignored, Ok(true));
+        assert_eq!(go_probe(&t.p(""), &t.p("real")).ignored, Ok(false));
+        assert_eq!(go_probe(&t.p(""), &t.p("")).ignored, Ok(false));
+        let (reason, _) = refusal(&go(t.p(""), t.p("copy"), go_probe));
+        assert_eq!(reason, "copy is ignored by git");
+        // A `.git` git cannot read is a failure named, not "not ignored".
+        let broken = Tree::new("go-ign-broken");
+        broken.file("sub/go.mod", "module op\n");
+        let got = go_probe(&broken.p(""), &broken.p("sub")).ignored;
+        assert!(matches!(&got, Err(e) if !e.is_empty()), "{got:?}");
+        let (reason, fix) = refusal(&go(broken.p(""), broken.p("sub"), go_probe));
+        assert!(reason.starts_with("git check-ignore failed: "), "{reason}");
+        assert_eq!(fix, Fix::None("run git check-ignore sub to see why".into()));
+    }
+
+    #[test]
+    fn required_version_reads_direct_and_block_forms() {
+        assert_eq!(
+            required_version(TOOLS_GOMOD, "golang.org/x/tools/gopls"),
+            Some("v0.23.0".into())
+        );
+        assert_eq!(
+            required_version(
+                "require golang.org/x/tools/gopls v0.1.0\n",
+                "golang.org/x/tools/gopls"
+            ),
+            Some("v0.1.0".into())
+        );
+        assert_eq!(
+            required_version(
+                "require golang.org/x/tools/goplsx v1\n",
+                "golang.org/x/tools/gopls"
+            ),
+            None
+        );
+    }
+
+    /// An offline tools module whose gopls is a local stand-in, built by the
+    /// real `go tool -modfile`.
+    fn fake_gopls_tree(name: &str, main_go: &str) -> Tree {
+        let t = Tree::new(name);
+        // `-modfile` resolves a relative `replace` from the module root (the
+        // cwd), not from tools/: the stand-in is named by absolute path.
+        let tools = format!(
+            "module tools\n\ngo 1.24\n\ntool golang.org/x/tools/gopls\n\nrequire golang.org/x/tools/gopls v0.0.0\n\nreplace golang.org/x/tools/gopls => {}\n",
+            t.p("fakegopls").display()
+        );
+        t.file("go.mod", "module op\n\ngo 1.24\n")
+            .file("tools/go.mod", &tools)
+            .file(
+                "fakegopls/go.mod",
+                "module golang.org/x/tools/gopls\n\ngo 1.24\n",
+            )
+            .file("fakegopls/main.go", main_go);
+        t
+    }
+
+    fn warmed(t: &Tree) -> Resolution {
+        let mut r = go(t.p(""), t.p(""), go_probe);
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        if let Some(s) = r.spawn.as_mut() {
+            s.env_set.push(("GOPROXY".into(), "off".into()));
+            s.env_set.push(("GOFLAGS".into(), "-mod=mod".into()));
+        }
+        warm_gopls(&mut r);
+        r
+    }
+
+    #[test]
+    fn real_go_builds_gopls_through_the_modfile() {
+        let t = fake_gopls_tree(
+            "go-real",
+            "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"golang.org/x/tools/gopls v0.0.0-fake\") }\n",
+        );
+        let r = warmed(&t);
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert!(r.spawn.is_some());
+    }
+
+    #[test]
+    fn refusal_gopls_build_failed() {
+        let t = fake_gopls_tree("go-broken", "package main\n\nfunc main() { undefined() }\n");
+        let r = warmed(&t);
+        let (reason, fix) = refusal(&r);
+        assert!(
+            reason.starts_with("gopls build failed: ") && reason.contains("undefined"),
+            "{reason}"
+        );
+        assert_eq!(
+            fix,
+            Fix::Command(format!(
+                "cd {} && GOTOOLCHAIN=local go build -o /dev/null golang.org/x/tools/gopls",
+                t.p("tools").display()
+            ))
+        );
+        assert!(r.spawn.is_none());
     }
 
     #[test]

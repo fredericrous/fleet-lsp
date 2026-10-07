@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.3.0
+
+Go's gopls is pinned per repository.
+
+- gopls runs from the repository's `tool golang.org/x/tools/gopls`: the
+  nearest `tools/go.mod` from the project root up to the git root, run as
+  `go tool -modfile=<tools/go.mod> gopls`, or the module's own go.mod
+  (`go tool gopls`). Both run with `GOTOOLCHAIN=local`, so gopls is built by
+  the machine's Go, never a downloaded toolchain. The PATH `gopls` is no
+  longer used.
+- Refused, each with its fix: `gopls is not pinned` (`mkdir -p tools && cd
+  tools && go mod init tools && go get -tool golang.org/x/tools/gopls@v0.23.0`);
+  `go <v> is older than <file>'s go <w>` (the tools module's or the
+  project's `go` line; a `toolchain` line is not read); `-modfile cannot
+  run with vendor/` or `go.work`; `<dir> is ignored by git`; `gopls build
+  failed: <error>`.
+- `doctor` builds gopls (`checking that gopls builds …` on stderr; only
+  the first run builds), so the first session does not wait on the build.
+- **`--json`: the `compatible` verdict is gone**; verdicts are `verified`
+  and `refused`. `doctor` exits 0 only when every language is verified.
+- The Go server's `startupTimeout` is 210 s: twice a cold gopls build
+  measured on a loaded machine (95 s) plus its 7.7 s start.
+- A `tools/` module (`module tools`) is not discovered as a Go project.
+- The plugin requires fleet-lsp 0.3.0. Rolling back to 0.2.0: point the
+  marketplace at `ref: v0.2.0`, update the plugin, put the 0.2.0 binary
+  first on PATH and `go install golang.org/x/tools/gopls@v0.23.0`.
+
 ## v0.2.0
 
 TypeScript's adapter is pinned per repository.

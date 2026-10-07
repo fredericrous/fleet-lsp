@@ -93,8 +93,9 @@ constant bumped, then the repositories in one batch.
   cwd = the project root and `GOTOOLCHAIN=local` (no silent toolchain
   download). gopls is therefore built by the local Go, which must be ≥ the
   tools module's `go` line (gopls v0.23.0 requires go 1.26.0) and ≥ the
-  project go.mod's `go`/`toolchain` line (`GOTOOLCHAIN=local` also governs
-  gopls's own `go list` on the workspace) — else refused.
+  project go.mod's `go` line (`GOTOOLCHAIN=local` also governs gopls's own
+  `go list` on the workspace, and ignores a higher `toolchain` line, so
+  that line is not compared) — else refused.
   This is a stated deviation from build.toolchain-source: gopls's toolchain
   is the machine's Go, not the module's ADR-0019 pin; `doctor` prints the
   Go that builds it.
@@ -104,8 +105,9 @@ constant bumped, then the repositories in one batch.
 - The `compatible` verdict and the PATH gopls go; `verdict: "compatible"`
   leaves `--json` (fleet consumers grepped first; CHANGELOG lists the new
   verdict set — a 0.x minor under ADR-0012).
-- First run builds gopls (cached after): `doctor` prints `building gopls
-  (first run only)` and warms the cache; a build failure is its own refusal.
+- First run builds gopls (cached after): `doctor` prints `checking that
+  gopls builds (the first run builds it: about a minute)` on stderr and
+  warms the cache; a build failure is its own refusal.
   The plugin's `startupTimeout` is set from Phase 5's measurement:
   ≥ 2 × (cold build + 7.7 s ready).
 
@@ -150,14 +152,14 @@ constant bumped, then the repositories in one batch.
 - [x] Phase 3 — 12 TypeScript PRs (`aval add` refresh, devDependency,
       checks above, doctor 0.2.0-local exit 0 `verified (adapter 6.0.1)`,
       CI green).
-- [ ] 🧑 decision: release fleet-lsp 0.2.0.
-- [ ] Phase 4 — release 0.2.0, `brew upgrade`; `npm rm -g
+- [x] 🧑 decision: release fleet-lsp 0.2.0.
+- [x] Phase 4 — release 0.2.0, `brew upgrade`; `npm rm -g
       typescript-language-server`; `which typescript-language-server`
       must find nothing.
-- [ ] Phase 5 — fleet-lsp 0.3.0 Go (branch): tools-module discovery,
+- [x] Phase 5 — fleet-lsp 0.3.0 Go (branch): tools-module discovery,
       `GOTOOLCHAIN=local` spawn, refusals, `compatible` removed; measure the
       cold gopls build and set `startupTimeout`.
-- [ ] Phase 6 — 8 Go PRs (`aval add` refresh, tools module, doctor
+- [x] Phase 6 — 8 Go PRs (`aval add` refresh, tools module, doctor
       0.3.0-local exit 0 `verified`, CI green).
 - [ ] 🧑 decision: release fleet-lsp 0.3.0.
 - [ ] Phase 7 — release 0.3.0, `brew upgrade`; remove `~/go/bin/gopls`;
@@ -283,10 +285,80 @@ Observed 2026-10-07:
   - No `.adr.yaml` (the rule cannot resolve there, the pin still holds):
     agent-console, ticket-vision, grid, governance-ts, duro-lexical-multi.
 
+- Phase 4 (2026-10-07, the person chose release + Phase 4): v0.2.0 tagged on
+  6509063; the release run concluded `success` with every job green (four
+  targets, checksums, GitHub release, tap, `brew can install`, plugin on
+  `release`); the release carries the four tarballs and SHA256SUMS; the
+  `release` branch's plugin.json is 0.2.0. `brew upgrade` → `fleet-lsp
+  0.2.0`; plugin updated 0.1.0 → 0.2.0. `npm rm -g
+  typescript-language-server` → `which` finds nothing. Live checkouts
+  installed (`npm ci` / `pnpm install --frozen-lockfile`, tracked tree
+  unchanged); doctor loop → 12/12 exit 0, `typescript verified … (adapter
+  6.0.1, node 24.14.0)` (social-planner and agent-console on TypeScript
+  6.0.3). agent-console and duro-app first refused (no node_modules; a
+  branch older than the pin) — their stale AGENTS.md/CLAUDE.md edits were
+  dropped at the person's request (main was current per `amont
+  agents-md` 1.47.0), then installed and verified. Live: a fresh `claude -p`
+  in duro-app on origin/main, `incomingCalls useCopyFeedback.ts:9` → 8
+  callers, served by the repository's adapter, gate open after 7 s.
+- Phase 5: `make check` — 109 unit tests (Go: tools module at the project
+  root and at the git root for a nested module; go.mod `tool` form; not
+  pinned; local Go older than the tools `go` line and than the project's,
+  a higher `toolchain` line staying verified; vendor/ and go.work; ignored
+  root; go missing; spawn args `tool -modfile=<abs> gopls` and
+  `GOTOOLCHAIN=local` asserted; two tests build a stand-in gopls through
+  the real `go tool -modfile`, offline with `GOPROXY=off GOFLAGS=-mod=mod`,
+  one of them a build failure → `gopls build failed: <compiler error>`).
+  The 20 integration tests pass alone; in one full run under load average
+  108 the 30 s teardown timing test took 48 s (the relay is untouched).
+  Found: `-modfile` resolves a relative `replace` from the module root
+  (cwd), not from tools/ — fixture uses an absolute path. Cold gopls build
+  (fresh GOCACHE) 53 s quiet, 95 s at load 78; warm 4.4–5.6 s → Go
+  `startupTimeout` 210 s (2 × (95 + 7.7)). No consumer parses the
+  `compatible` verdict (searched skills, agents, dotfiles). Live: a fresh
+  `claude -p` in authelia-oidc-operator with a tools module,
+  `incomingCalls assembler.go:30` → 3 callers via `go tool -modfile`.
+- Phase 6: 8 PRs merged, CI green — homelab #1028 (one shared
+  tools/go.mod for bootstrap, ops/newapp, services/breakglass-watch,
+  wasm/subsonic-auth at go 1.22.12), amont-pack-homelab #6, cluster-vision
+  #53, vault-transit-unseal-operator #9, authelia-oidc-operator #10,
+  homelab-preview-operator #28, ddns-updater-operator #10, duro-operator
+  #13. Doctor (0.3.0 build) → `go verified v0.23.0 (go 1.27.1)`, pin
+  `tools/go.mod …`, in all 11 module roots (duro-operator on origin/main;
+  its live checkout holds uncommitted work and was left behind).
+  Differences from the plan, found and fixed on the way:
+  - amont's go-vet/go-test gates failed on a module with no package
+    ("matched no packages"): fixed upstream (the person's choice) in amont
+    #300, released 1.47.1 — tools/ stays go.mod + go.sum only.
+  - controller-gen `paths="./..."` loads every nested go.mod, so the
+    operators' `make manifests/generate` loaded tools/ (go 1.27.1, gopls
+    needs ≥ 1.26) under their `GOTOOLCHAIN=go1.25.x`: the five operator
+    Makefiles now list their own package dirs; regenerated output
+    unchanged, `make test` green.
+  - The gitignored operator clones inside homelab are repositories of
+    their own (their own `.git`), so they resolve as themselves (`gopls
+    is not pinned` until pulled), not as `ignored by git`; that refusal
+    covers a plain ignored subdirectory.
+  - `go mod init tools` writes the local Go (1.27.1) as the tools `go`
+    line; a machine with an older Go is refused with "upgrade Go".
+  - Homebrew `rust` 1.99 reappeared ahead of rustup (clippy lint in amont's
+    pre-commit); uninstalled again.
+- Phase 5 live, shared tools module (after the implementation review):
+  homelab `wasm/subsonic-auth` (go 1.22.12), fresh `claude -p`
+  `documentSymbol main.go` → expected the file's 11 top-level declarations
+  → answered 11; the log shows git root `homelab`, project root
+  `wasm/subsonic-auth`, pin `tools/go.mod … v0.23.0`, verdict verified.
+- Ignored root, real git (after the review): a `git init` tree with
+  `copy/` in .gitignore → `copy is ignored by git`; an empty `.git` with no repository
+  above it
+  → `git check-ignore failed: …`, never "not ignored".
+
 ## Implementation review
 
 - fleet-lsp 0.2.0 (Phase 1): round 1 approve-with-changes (64k, 65 s) — 6 findings, all fixed in 4df69b0: rollback pins the plugin too, Node probe an input (tests no longer skip), refusals for missing/failing node and missing/unreadable pyproject, `holds-until:` on `engines_floor`, integration-test substitution stated. Delta: approve (34k, 17 s), no new findings.
 - Hand checks after the delta: `doctor` with no `node` on PATH → `node is not on PATH`; with a `node` that exits 3 → `<path> --version failed`; tag v0.1.0 carries plugin.json 0.1.0. Next: 🧑 release 0.2.0.
+- fleet-lsp 0.3.0 (Phases 5–6): round 1 approve-with-changes (65k, 69 s) — 6 findings, all fixed in d003a95/68f6885: git check-ignore failures refused by name (three-valued probe) with a real-git test; subsonic-auth live answer recorded (11 = 11); build fix keeps `GOTOOLCHAIN=local`; CI Go pinned 1.27.1; plan Behaviour matches code.
+- Delta: approve (33k, 28 s); its low wording note fixed here. Deliberate: `compatible` removed without a prior-minor warning — SemVer 0.x (ADR-0012), stated in plan and CHANGELOG. Next: 🧑 release 0.3.0.
 
 ## Outcome
 
