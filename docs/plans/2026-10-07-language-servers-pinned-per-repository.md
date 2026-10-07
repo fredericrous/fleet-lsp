@@ -154,10 +154,10 @@ constant bumped, then the repositories in one batch.
 - [x] Phase 4 — release 0.2.0, `brew upgrade`; `npm rm -g
       typescript-language-server`; `which typescript-language-server`
       must find nothing.
-- [ ] Phase 5 — fleet-lsp 0.3.0 Go (branch): tools-module discovery,
+- [x] Phase 5 — fleet-lsp 0.3.0 Go (branch): tools-module discovery,
       `GOTOOLCHAIN=local` spawn, refusals, `compatible` removed; measure the
       cold gopls build and set `startupTimeout`.
-- [ ] Phase 6 — 8 Go PRs (`aval add` refresh, tools module, doctor
+- [x] Phase 6 — 8 Go PRs (`aval add` refresh, tools module, doctor
       0.3.0-local exit 0 `verified`, CI green).
 - [ ] 🧑 decision: release fleet-lsp 0.3.0.
 - [ ] Phase 7 — release 0.3.0, `brew upgrade`; remove `~/go/bin/gopls`;
@@ -299,6 +299,48 @@ Observed 2026-10-07:
   agents-md` 1.47.0), then installed and verified. Live: a fresh `claude -p`
   in duro-app on origin/main, `incomingCalls useCopyFeedback.ts:9` → 8
   callers, served by the repository's adapter, gate open after 7 s.
+- Phase 5: `make check` — 109 unit tests (Go: tools module at the project
+  root and at the git root for a nested module; go.mod `tool` form; not
+  pinned; local Go older than the tools `go` line and than the project's,
+  a higher `toolchain` line staying verified; vendor/ and go.work; ignored
+  root; go missing; spawn args `tool -modfile=<abs> gopls` and
+  `GOTOOLCHAIN=local` asserted; two tests build a stand-in gopls through
+  the real `go tool -modfile`, offline with `GOPROXY=off GOFLAGS=-mod=mod`,
+  one of them a build failure → `gopls build failed: <compiler error>`).
+  The 20 integration tests pass alone; in one full run under load average
+  108 the 30 s teardown timing test took 48 s (the relay is untouched).
+  Found: `-modfile` resolves a relative `replace` from the module root
+  (cwd), not from tools/ — fixture uses an absolute path. Cold gopls build
+  (fresh GOCACHE) 53 s quiet, 95 s at load 78; warm 4.4–5.6 s → Go
+  `startupTimeout` 210 s (2 × (95 + 7.7)). No consumer parses the
+  `compatible` verdict (searched skills, agents, dotfiles). Live: a fresh
+  `claude -p` in authelia-oidc-operator with a tools module,
+  `incomingCalls assembler.go:30` → 3 callers via `go tool -modfile`.
+- Phase 6: 8 PRs merged, CI green — homelab #1028 (one shared
+  tools/go.mod for bootstrap, ops/newapp, services/breakglass-watch,
+  wasm/subsonic-auth at go 1.22.12), amont-pack-homelab #6, cluster-vision
+  #53, vault-transit-unseal-operator #9, authelia-oidc-operator #10,
+  homelab-preview-operator #28, ddns-updater-operator #10, duro-operator
+  #13. Doctor (0.3.0 build) → `go verified v0.23.0 (go 1.27.1)`, pin
+  `tools/go.mod …`, in all 11 module roots (duro-operator on origin/main;
+  its live checkout holds uncommitted work and was left behind).
+  Differences from the plan, found and fixed on the way:
+  - amont's go-vet/go-test gates failed on a module with no package
+    ("matched no packages"): fixed upstream (the person's choice) in amont
+    #300, released 1.47.1 — tools/ stays go.mod + go.sum only.
+  - controller-gen `paths="./..."` loads every nested go.mod, so the
+    operators' `make manifests/generate` loaded tools/ (go 1.27.1, gopls
+    needs ≥ 1.26) under their `GOTOOLCHAIN=go1.25.x`: the five operator
+    Makefiles now list their own package dirs; regenerated output
+    unchanged, `make test` green.
+  - The gitignored operator clones inside homelab are repositories of
+    their own (their own `.git`), so they resolve as themselves (`gopls
+    is not pinned` until pulled), not as `ignored by git`; that refusal
+    covers a plain ignored subdirectory.
+  - `go mod init tools` writes the local Go (1.27.1) as the tools `go`
+    line; a machine with an older Go is refused with "upgrade Go".
+  - Homebrew `rust` 1.99 reappeared ahead of rustup (clippy lint in amont's
+    pre-commit); uninstalled again.
 
 ## Implementation review
 
