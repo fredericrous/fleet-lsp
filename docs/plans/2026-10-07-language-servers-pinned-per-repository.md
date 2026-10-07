@@ -150,8 +150,8 @@ constant bumped, then the repositories in one batch.
 - [x] Phase 3 — 12 TypeScript PRs (`aval add` refresh, devDependency,
       checks above, doctor 0.2.0-local exit 0 `verified (adapter 6.0.1)`,
       CI green).
-- [ ] 🧑 decision: release fleet-lsp 0.2.0.
-- [ ] Phase 4 — release 0.2.0, `brew upgrade`; `npm rm -g
+- [x] 🧑 decision: release fleet-lsp 0.2.0.
+- [x] Phase 4 — release 0.2.0, `brew upgrade`; `npm rm -g
       typescript-language-server`; `which typescript-language-server`
       must find nothing.
 - [ ] Phase 5 — fleet-lsp 0.3.0 Go (branch): tools-module discovery,
@@ -282,6 +282,23 @@ Observed 2026-10-07:
     locked with pnpm 10 (pnpm 9 `--frozen-lockfile` accepts it).
   - No `.adr.yaml` (the rule cannot resolve there, the pin still holds):
     agent-console, ticket-vision, grid, governance-ts, duro-lexical-multi.
+
+- Phase 4 (2026-10-07, the person chose release + Phase 4): v0.2.0 tagged on
+  6509063; the release run concluded `success` with every job green (four
+  targets, checksums, GitHub release, tap, `brew can install`, plugin on
+  `release`); the release carries the four tarballs and SHA256SUMS; the
+  `release` branch's plugin.json is 0.2.0. `brew upgrade` → `fleet-lsp
+  0.2.0`; plugin updated 0.1.0 → 0.2.0. `npm rm -g
+  typescript-language-server` → `which` finds nothing. Live checkouts
+  installed (`npm ci` / `pnpm install --frozen-lockfile`, tracked tree
+  unchanged); doctor loop → 12/12 exit 0, `typescript verified … (adapter
+  6.0.1, node 24.14.0)` (social-planner and agent-console on TypeScript
+  6.0.3). agent-console and duro-app first refused (no node_modules; a
+  branch older than the pin) — their stale AGENTS.md/CLAUDE.md edits were
+  dropped at the person's request (main was current per `amont
+  agents-md` 1.47.0), then installed and verified. Live: a fresh `claude -p`
+  in duro-app on origin/main, `incomingCalls useCopyFeedback.ts:9` → 8
+  callers, served by the repository's adapter, gate open after 7 s.
 
 ## Implementation review
 
