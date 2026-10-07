@@ -318,7 +318,7 @@ with the upgrade command, instead of running a mismatched pair.
       release on `v0.1.0` by `workflow_dispatch` so `publish-tap`,
       `verify-brew` and the first `release` fast-forward run; `gh run view
       --json conclusion` must read `success`.
-- [ ] Phase 6 — dotfiles, on PR #17's branch (pointer plan there), two
+- [x] Phase 6 — dotfiles, on PR #17's branch (pointer plan there), two
       commits: (a) Brewfile `fredericrous/tap/fleet-lsp` +
       `typescript-language-server`, `extraKnownMarketplaces` fleet-lsp;
       (b) once `fleet-lsp doctor` exits 0 in relais and
@@ -382,6 +382,15 @@ with the upgrade command, instead of running a mismatched pair.
   missed once on a saturated macos-latest runner while a heavy test ran
   beside it; the bound stays, the overlap goes.
 
+- 2026-10-07 — The cancel integration test's window goes from 100 ms to
+  1 s. macos-latest missed 100 ms again with no heavy test beside it
+  (dotfiles-era PR #3 run 37579094602): the end-to-end path — fleet-lsp,
+  a Python fake, an event file polled every 20 ms — exceeds it on a shared
+  runner. What the 100 ms stood for is proven where timing is exact: the
+  core unit test releases the trailing notification in the same step as
+  the cancel; and with the gate never opening, any delivery at all proves
+  the release.
+
 ## Verification
 
 - Phase 0: `docs/readiness.md` holds, per server/version, the observed
@@ -415,7 +424,8 @@ with the upgrade command, instead of running a mismatched pair.
   gets the workspace-did-not-load error, `warning` → answered plus one
   `window/showMessage`; fake sends `workspace/configuration` before ready →
   answered within 1 s; held request cancelled → its trailing `didChange`
-  reaches the fake within 100 ms; **fake alive but not reading stdin** while
+  reaches the fake within 1 s (same-step release: core unit test
+  `cancel_of_a_held_request_answers_it_and_frees_what_was_behind`); **fake alive but not reading stdin** while
   a 20 MiB `didOpen` is sent → teardown within 36 s, exit 1, fake gone;
   **client not reading stdout** while the fake floods diagnostics →
   teardown within 36 s; **fake reading stdin slowly (1 MiB/s) while
@@ -465,7 +475,7 @@ sessions via `--plugin-dir`, official LSP plugins off for the session):
 - Integration, all observed: held request answered at ≥ 1.8 s with a 2 s
   readiness delay, `didChange` after it; `workspace/configuration` reply
   delivered within 1 s with `logLevel` rewritten to Information; cancel →
-  -32800 and the trailing `didChange` within 500 ms; `FLEET_LSP_CEILING_MS=2000`
+  -32800 and the trailing `didChange` within the asserted 1 s; `FLEET_LSP_CEILING_MS=2000`
   → error at ~2 s reading "after 2s"; shutdown+exit → 0, fake reaped;
   stdin EOF and SIGTERM while held → fake gone < 6 s; fake exiting on its
   own → "the server exited", exit 1; server not reading → torn down at
@@ -525,9 +535,18 @@ Observed 2026-10-07, release (person's decision: merge + release now):
   `/usr/local/bin/fleet-lsp`, `fleet-lsp 0.1.0`; `fleet-lsp doctor` exit 0
   in relais (rust 1.94.1 verified) and in authelia-oidc-operator (gopls
   compatible) — the gate for Phase 6 (b).
-- Not yet observed: Phase 6 after `chezmoi apply` (a fresh session
-  installing fleet-lsp@fleet-lsp from the release ref and answering with
-  the official plugins off).
+- Phase 6 (dotfiles#17, merged as 4c9a40c with a merge commit so the
+  rollback commit d2180b2 stays revertable): applied here — agents and
+  Brewfile by `chezmoi apply`, settings patched by hand to keep the
+  machine's local `"model"` line; `fleet-lsp@fleet-lsp` 0.1.0 installed
+  from the `release` ref, enabled, official LSP plugins off. Fresh
+  sessions, no flags: relais `incomingCalls resume.rs:169` → the 7 callers
+  incl. `reconcile_run main.rs`; authelia `incomingCalls assembler.go:30` →
+  the 3 callers; each session wrote its own fleet-lsp log.
+- Not as planned: the Brewfile's `typescript-language-server` has no bottle
+  for this Intel Mac; `brew install` spent 4.5 h compiling its dependency
+  chain (cmake, then node) and was stopped. The adapter fleet-lsp verified
+  is the npm-installed 6.0.1, which stays until that line is settled.
 
 ## Implementation review
 
