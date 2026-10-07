@@ -320,7 +320,8 @@ with the upgrade command, instead of running a mismatched pair.
       --json conclusion` must read `success`.
 - [x] Phase 6 — dotfiles, on PR #17's branch (pointer plan there), two
       commits: (a) Brewfile `fredericrous/tap/fleet-lsp` +
-      `typescript-language-server`, `extraKnownMarketplaces` fleet-lsp;
+      `typescript-language-server` (the latter later dropped by
+      dotfiles#18: no Homebrew bottle on Intel macOS), `extraKnownMarketplaces` fleet-lsp;
       (b) once `fleet-lsp doctor` exits 0 in relais and
       authelia-oidc-operator on the machine, `enabledPlugins`
       `fleet-lsp@fleet-lsp` on, official `gopls/rust-analyzer/typescript/pyright-lsp`
@@ -553,7 +554,8 @@ Observed 2026-10-07, release (person's decision: merge + release now):
 - Not as planned: the Brewfile's `typescript-language-server` has no bottle
   for this Intel Mac; `brew install` spent 4.5 h compiling its dependency
   chain (cmake, then node) and was stopped. The adapter fleet-lsp verified
-  is the npm-installed 6.0.1, which stays until that line is settled.
+  is the npm-installed 6.0.1. Settled the same day: dotfiles#18 dropped
+  the Brewfile line, and the npm adapter 6.0.1 is the supported one.
 
 ## Implementation review
 
