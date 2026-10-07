@@ -15,12 +15,18 @@ use std::time::{Duration, Instant};
 const BIN: &str = env!("CARGO_BIN_EXE_fleet-lsp");
 
 /// The tests that move tens of MiB through a Python fake are CPU-bound;
-/// run concurrently they starve each other and the light tests on a small
-/// runner. They take this lock, so they run one at a time.
-static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// beside them a light test's timing bound (e.g. 100 ms) is measured on a
+/// starved machine. Heavy tests take this lock exclusively, light ones
+/// shared: light tests run together, never beside a heavy one, and heavy
+/// tests run one at a time.
+static LOAD: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-fn heavy() -> std::sync::MutexGuard<'static, ()> {
-    HEAVY.lock().unwrap_or_else(|p| p.into_inner())
+fn heavy() -> std::sync::RwLockWriteGuard<'static, ()> {
+    LOAD.write().unwrap_or_else(|p| p.into_inner())
+}
+
+fn light() -> std::sync::RwLockReadGuard<'static, ()> {
+    LOAD.read().unwrap_or_else(|p| p.into_inner())
 }
 
 struct Fixture {
@@ -315,6 +321,7 @@ const CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange","para
 
 #[test]
 fn a_request_waits_for_readiness_and_keeps_its_order() {
+    let _light = light();
     let fx = Fixture::new("ready", true);
     let mut s = Session::start(&fx, &[("FAKE_READY_DELAY", "3")], true);
     // t = 0 is `initialized`: the fake becomes ready 3 s after it.
@@ -345,6 +352,7 @@ fn a_request_waits_for_readiness_and_keeps_its_order() {
 
 #[test]
 fn a_configuration_reply_is_never_held_and_keeps_pyright_logging() {
+    let _light = light();
     let fx = Fixture::new("config", true);
     let mut s = Session::start(&fx, &[("FAKE_CONFIG_FIRST", "1")], true);
     s.initialize(&fx.dir);
@@ -376,6 +384,7 @@ fn a_configuration_reply_is_never_held_and_keeps_pyright_logging() {
 
 #[test]
 fn cancelling_a_held_request_releases_the_notification_behind_it() {
+    let _light = light();
     let fx = Fixture::new("cancel", true);
     let mut s = Session::start(&fx, &[("FAKE_NEVER_READY", "1")], true);
     s.initialize(&fx.dir);
@@ -402,6 +411,7 @@ fn cancelling_a_held_request_releases_the_notification_behind_it() {
 
 #[test]
 fn ceiling_from_the_environment_answers_with_an_error() {
+    let _light = light();
     let fx = Fixture::new("ceiling", true);
     let mut s = Session::start(
         &fx,
@@ -424,6 +434,7 @@ fn ceiling_from_the_environment_answers_with_an_error() {
 
 #[test]
 fn shutdown_then_exit_is_exit_0_and_the_server_is_reaped() {
+    let _light = light();
     let fx = Fixture::new("shutdown", true);
     let mut s = Session::start(&fx, &[], true);
     s.initialize(&fx.dir);
@@ -439,6 +450,7 @@ fn shutdown_then_exit_is_exit_0_and_the_server_is_reaped() {
 
 #[test]
 fn stdin_eof_while_held_tears_down_within_6s() {
+    let _light = light();
     let fx = Fixture::new("eof", true);
     let mut s = Session::start(&fx, &[("FAKE_NEVER_READY", "1")], true);
     s.initialize(&fx.dir);
@@ -451,6 +463,7 @@ fn stdin_eof_while_held_tears_down_within_6s() {
 
 #[test]
 fn sigterm_while_held_leaves_no_server_behind() {
+    let _light = light();
     let fx = Fixture::new("term", true);
     let mut s = Session::start(&fx, &[("FAKE_NEVER_READY", "1")], true);
     s.initialize(&fx.dir);
@@ -469,6 +482,7 @@ fn sigterm_while_held_leaves_no_server_behind() {
 
 #[test]
 fn a_server_that_exits_on_its_own_fails_held_requests() {
+    let _light = light();
     let fx = Fixture::new("selfexit", true);
     let mut s = Session::start(
         &fx,
@@ -486,6 +500,7 @@ fn a_server_that_exits_on_its_own_fails_held_requests() {
 
 #[test]
 fn no_venv_is_a_refusal_the_client_can_read() {
+    let _light = light();
     let fx = Fixture::new("stub", false);
     let mut s = Session::start(&fx, &[], true);
     s.send(&format!(
@@ -518,6 +533,7 @@ fn no_venv_is_a_refusal_the_client_can_read() {
 
 #[test]
 fn a_newer_plugin_gets_the_upgrade_refusal() {
+    let _light = light();
     let fx = Fixture::new("minver", true);
     let mut s = Session::start_args(
         &fx,
@@ -762,6 +778,7 @@ fn sustained_traffic_while_closed_overloads_without_losing_notifications() {
 
 #[test]
 fn doctor_into_a_closed_pipe_exits_0_without_a_panic() {
+    let _light = light();
     let fx = Fixture::new("pipe", true);
     let mut child = Command::new(BIN)
         .arg("doctor")
@@ -780,6 +797,7 @@ fn doctor_into_a_closed_pipe_exits_0_without_a_panic() {
 
 #[test]
 fn doctor_reports_the_verified_fixture() {
+    let _light = light();
     let fx = Fixture::new("doctor", true);
     let out = Command::new(BIN)
         .arg("doctor")
@@ -815,6 +833,7 @@ fn doctor_reports_the_verified_fixture() {
 
 #[test]
 fn closed_stdin_before_initialize_is_exit_1() {
+    let _light = light();
     let fx = Fixture::new("noinit", true);
     let mut s = Session::start(&fx, &[], true);
     s.stdin = None;
@@ -832,6 +851,7 @@ fn start_rust(fx: &Fixture, env: &[(&str, &str)]) -> Session {
 
 #[test]
 fn rust_waits_for_quiescence_and_never_shows_the_status() {
+    let _light = light();
     let fx = Fixture::rust("ra-ready");
     let mut s = start_rust(&fx, &[("FAKE_READY_DELAY", "3")]);
     let t0 = Instant::now();
@@ -867,6 +887,7 @@ fn rust_waits_for_quiescence_and_never_shows_the_status() {
 
 #[test]
 fn rust_health_error_refuses_with_the_message() {
+    let _light = light();
     let fx = Fixture::rust("ra-error");
     let mut s = start_rust(
         &fx,
@@ -889,6 +910,7 @@ fn rust_health_error_refuses_with_the_message() {
 
 #[test]
 fn rust_health_warning_answers_and_shows_the_warning() {
+    let _light = light();
     let fx = Fixture::rust("ra-warning");
     let mut s = start_rust(
         &fx,

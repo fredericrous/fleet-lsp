@@ -376,6 +376,12 @@ with the upgrade command, instead of running a mismatched pair.
   reaches the session log and `window/showMessage`, but Claude Code does not
   show `showMessage` to the agent.
 
+- 2026-10-07 — Integration tests run in two classes: the four heavy ones
+  (tens of MiB through a Python fake) take a lock exclusively, the light
+  ones share it. A light test's timing bound (the 100 ms cancel window) was
+  missed once on a saturated macos-latest runner while a heavy test ran
+  beside it; the bound stays, the overlap goes.
+
 ## Verification
 
 - Phase 0: `docs/readiness.md` holds, per server/version, the observed
