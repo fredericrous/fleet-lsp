@@ -147,7 +147,7 @@ constant bumped, then the repositories in one batch.
       node_modules, exact-name lockfile lookup, Node check, refusal texts,
       README/CHANGELOG; live checks incl. TypeScript 6.0.3.
 - [x] Phase 2 — the rule in `decisions` (one PR).
-- [ ] Phase 3 — 12 TypeScript PRs (`aval add` refresh, devDependency,
+- [x] Phase 3 — 12 TypeScript PRs (`aval add` refresh, devDependency,
       checks above, doctor 0.2.0-local exit 0 `verified (adapter 6.0.1)`,
       CI green).
 - [ ] 🧑 decision: release fleet-lsp 0.2.0.
@@ -241,6 +241,37 @@ Observed 2026-10-07:
   → constraint, adopts ADR-0019, active. Implementation review: approve-
   with-changes (source line, gopls exception, broker role) → fixed; delta
   approve-with-changes (record this here) → this entry.
+- Phase 3: 12 PRs merged, each CI `success` (governance-ts has no CI:
+  build + 14 tests run locally, green): agent-console #9, customer-vision
+  #19, kb-vision #39, ticket-vision #18, application-landscape #323,
+  social-planner #54, grid #34, governance-ts #2, website-builder #198,
+  duro-lexical-multi #20 (Forgejo); duro-app #141 (replaced #139 after a
+  conflict, rebased without a force-push), duro-design-system #73 (GitHub).
+  `doctor` (0.2.0 local build) → exit 0, `typescript verified … (adapter
+  6.0.1, node 24.14.0)` in all 12, and inside a workspace member
+  (duro-design-system `packages/cli`, website-builder `apps/builder-api`)
+  it resolves the workspace root. Every lockfile diff adds only the
+  adapter. Published libs: `npm pack --dry-run` file lists identical
+  (grid 202, governance-ts 6, duro-lexical-multi 148, duro-design-system 7
+  packages); only `package.json` grows by the devDependency line.
+  TypeScript 6.0.3 live (social-planner): `documentSymbol` answered, gate
+  open after ~88 s, verdict verified — the barrier key stays the adapter.
+  Differences from the plan, recorded not fixed:
+  - Runtime images: agent-console, customer-vision, social-planner,
+    duro-app install prod-only; kb-vision, ticket-vision,
+    application-landscape (tsx relay, deliberate) and four website-builder
+    images (builder-api, builder-admin, workerd-runtime, sync-bridge) copy
+    the builder's full `node_modules`, so they already ship every
+    devDependency and now the adapter too (~2.4 MB, ~3.6 MB with pnpm's
+    extras). Pre-existing; a prod-only install there is separate work.
+  - pnpm repos: pnpm's built-in compatibility table adds
+    `vscode-jsonrpc`/`vscode-languageserver-protocol` to the adapter
+    (~1.2 MB) — "zero dependencies" holds for npm only. Turning it off is
+    repo-wide; left on.
+  - duro-lexical-multi: main's lockfile is pnpm 10 while CI runs pnpm 9;
+    locked with pnpm 10 (pnpm 9 `--frozen-lockfile` accepts it).
+  - No `.adr.yaml` (the rule cannot resolve there, the pin still holds):
+    agent-console, ticket-vision, grid, governance-ts, duro-lexical-multi.
 
 ## Outcome
 
