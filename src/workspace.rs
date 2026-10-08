@@ -534,6 +534,11 @@ impl Workspace {
         }
         // A child still starting is never evicted: what waits for its
         // `initialize` would have nowhere to go.
+        // holds-until: children start one per request and answer
+        // `initialize` within seconds, so the cap is exceeded by at most the
+        // children still starting (one per repository asked about at once);
+        // a session that opens many repositories in the same seconds would
+        // need starts queued behind the cap instead.
         let (serving, slots) = (&self.serving, &self.slots);
         let live = |r: &PathBuf| {
             serving
