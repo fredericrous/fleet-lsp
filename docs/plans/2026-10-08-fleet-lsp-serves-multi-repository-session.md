@@ -186,7 +186,7 @@ Otherwise, workspace mode runs:
       - Fixtures: a non-git parent holding python repos A and B, A2 (same
         basename as A, in another folder) and C (no venv).
 - [x] Phase 4 (README, CHANGELOG and the hook line shipped with Phases 1–3;
-      the rest in #11 and #12): plugin `--min-version 0.5.0`; release
+      the rest in #11 and #12, as 0.5.1): plugin `--min-version 0.5.1`; release
       0.5.0 (tag-release); install it the way the repository documents;
       then the live check in a fresh Claude Code session started in
       `~/Developer/Perso`.
@@ -202,8 +202,13 @@ Otherwise, workspace mode runs:
 - 2026-10-08: cap of 4 children per language, configurable and LRU, because
   rust-analyzer can hold over 1 GB per repository. The default is
   re-checked against the RSS measured in Verification.
-- 2026-10-08: rollback is plugin `--min-version 0.4.0` plus installing
-  0.4.0. Nothing persistent is written, so nothing needs migrating.
+- 2026-10-08: rollback is to point the marketplace at `ref: v0.4.0`,
+  update the plugin, and put the 0.4.0 binary first on PATH. Nothing
+  persistent is written, so nothing needs migrating.
+- 2026-10-09: released as 0.5.1, not 0.5.0. 0.5.0's `brew` check failed
+  because doctor's refusal moved to stderr and the tap formula's test read
+  stdout. 0.5.1 fixed `packaging/fleet-lsp.rb`, and the tap's copy was
+  fixed in homebrew-tap#9. The plugin pins `--min-version 0.5.1`.
 - 2026-10-09: workspace mode is its own shell (`src/workspace.rs`) rather
   than `Shell` grown to `Vec<ChildSlot>`, so single-root mode keeps its
   code path byte for byte; the two share the client threads, the child
