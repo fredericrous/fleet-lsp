@@ -48,7 +48,10 @@ class FleetLsp < Formula
   test do
     assert_match "serve", shell_output("#{bin}/fleet-lsp --help")
     assert_match version.to_s, shell_output("#{bin}/fleet-lsp --version")
-    # Outside a repository doctor refuses, with exit 1 and the reason.
-    assert_match "not in a git repository", shell_output("#{bin}/fleet-lsp doctor", 1)
+    # Outside a repository doctor refuses, with exit 1 and the reason on
+    # stderr (since 0.5.0), naming the command that checks one repository.
+    refusal = shell_output("#{bin}/fleet-lsp doctor 2>&1", 1)
+    assert_match "not in a git repository", refusal
+    assert_match "fleet-lsp doctor <repo>", refusal
   end
 end

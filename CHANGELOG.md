@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.1
+
+- The Homebrew formula's test reads `fleet-lsp doctor`'s refusal from
+  stderr, where 0.5.0 moved it. 0.5.0's release stopped at that test, so
+  its plugin never shipped; 0.5.1 is the first release of workspace mode.
+
 ## v0.5.0
 
 - **Workspace mode.** A session started outside any git repository (for
@@ -19,7 +25,7 @@
 - A Cargo workspace member resolves to its workspace root (as uv and pnpm
   members already did): one rust-analyzer per workspace, whichever crate's
   file is asked about first.
-- The plugin requires fleet-lsp 0.5.0. Rolling back to 0.4.0: point the
+- The plugin requires fleet-lsp 0.5.0 (0.5.1 from v0.5.1). Rolling back to 0.4.0: point the
   marketplace at `ref: v0.4.0`, update the plugin, put the 0.4.0 binary
   first on PATH; nothing persistent was written.
 
