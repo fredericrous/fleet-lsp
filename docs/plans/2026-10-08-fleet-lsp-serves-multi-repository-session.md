@@ -60,9 +60,10 @@ Otherwise, workspace mode runs:
    `project_root`), cached per directory.
 3. **Open documents are tracked**: uri → languageId, version, latest full
    text.
-   - `didOpen`, `didChange` and `didClose` only update this store while
-     their root has no live child, so a notification never spawns one.
-   - While a child is live, they are also forwarded to it.
+   - `didOpen`, `didChange` and `didClose` always update this store, and a
+     notification never spawns a child.
+   - While a child is live, they are also forwarded to it; one still
+     starting gets the store in its replay instead.
 4. **Only a request spawns a child.** The first request for a root resolves
    it with `resolve::resolve`.
    - **On success**, the child is spawned with the saved `initialize`. Its
@@ -97,9 +98,10 @@ Otherwise, workspace mode runs:
    - A server→client request keeps its original id inside `Core`, so
      `config_requests` and the pyright log-level guard work unchanged. The
      reader renumbers it on the way to the client as the string
-     `s<slot>:<orig>`, unique across slots. A per-slot `Arc<Mutex<IdTable>>`
-     holds the map, kept apart from `ServerFilter`, which stays `Copy`. The
-     shell maps the client's answer back before `Core::client_response`.
+     `s<slot>:<orig JSON>`, unique across slots, and the shell parses the
+     client's answer back to the slot and the original id before
+     `Core::client_response`. No table is kept, and `ServerFilter` stays
+     `Copy`.
    - The shell keeps a map from client id to slot, so `$/cancelRequest`
      goes to the slot holding the id. An entry is removed when its reply
      passes.
@@ -123,12 +125,14 @@ Otherwise, workspace mode runs:
 9. **Bounded.**
    - At most `FLEET_LSP_MAX_CHILDREN` live children per language (default
      4).
-   - A new root over the cap evicts the least recently used child: it is
+   - A new root over the cap evicts the least recently used live child
+     (one still starting is never evicted): it is
      sent `shutdown` and `exit`, its slot enters a non-blocking `closing
      since T` state, and `housekeeping` calls `try_wait` on it and kills it
      after `TEARDOWN`. Its documents stay in the store for a later replay.
-   - A root whose child dies is respawned on its next request, at most 2
-     times (matching the plugin's `maxRestarts`). After that its requests
+   - A root whose child dies is respawned on its next request, until it
+     has died 3 times (the first start plus the plugin's `maxRestarts` of
+     2; an eviction is not a death). After that its requests
      are refused with the name of its log file.
 10. **Logs.**
     - Each child's stderr is piped. A reader thread writes it to that
@@ -157,7 +161,7 @@ Otherwise, workspace mode runs:
     recently."
 
 ## Phases
-- [ ] Phase 1: the pure routing layer, `src/route.rs`, with no I/O and unit
+- [x] Phase 1: the pure routing layer, `src/route.rs`, with no I/O and unit
       tests. It holds the URI extraction (a nested `params` read, reusing
       `json` and `relay::file_uri_path`), the root cache, the document store
       with replay minus trigger, the MRU and cap policy, and the
@@ -165,7 +169,7 @@ Otherwise, workspace mode runs:
       map. `core::prepare_initialize` is extracted and
       `Core::adopt_filter` added. `Core` gains the `ChildDead` flag, and its
       existing tests are unchanged.
-- [ ] Phase 2: workspace mode in `relay.rs`.
+- [x] Phase 2: workspace mode in `relay.rs`.
       - `Shell` goes from one child to `Vec<ChildSlot>`, each with its own
         `Core`, process, queues, threads and stderr→log thread. Events are
         tagged by slot.
@@ -175,13 +179,14 @@ Otherwise, workspace mode runs:
       - Closing slots, the shared teardown deadline and the restart budget.
       - The workspace refusal texts, `doctor [PATH]` and the hook line.
       - Single-root mode keeps its current code path.
-- [ ] Phase 3: integration tests in `tests/relay.rs`.
+- [x] Phase 3: integration tests in `tests/relay.rs`.
       - `fake_server.py` learns to log `rootUri` and each `didOpen`
         uri/version, to answer with its own cwd, and to ignore `exit`
         (`FAKE_IGNORE_EXIT`).
       - Fixtures: a non-git parent holding python repos A and B, A2 (same
         basename as A, in another folder) and C (no venv).
-- [ ] Phase 4: README, CHANGELOG and plugin `--min-version 0.5.0`; release
+- [ ] Phase 4 (README, CHANGELOG and the hook line shipped with Phases 1–3;
+      the rest is next): plugin `--min-version 0.5.0`; release
       0.5.0 (tag-release); install it the way the repository documents;
       then the live check in a fresh Claude Code session started in
       `~/Developer/Perso`.
@@ -199,12 +204,34 @@ Otherwise, workspace mode runs:
   re-checked against the RSS measured in Verification.
 - 2026-10-08: rollback is plugin `--min-version 0.4.0` plus installing
   0.4.0. Nothing persistent is written, so nothing needs migrating.
+- 2026-10-09: workspace mode is its own shell (`src/workspace.rs`) rather
+  than `Shell` grown to `Vec<ChildSlot>`, so single-root mode keeps its
+  code path byte for byte; the two share the client threads, the child
+  writer and `relay::observe_notification`.
+- 2026-10-09: a server request's client-facing id is `s<slot>:<orig JSON>`
+  and is read back by parsing it, so there is no id table and no mutex
+  (the review's `Arc<Mutex<IdTable>>` is not needed).
+- 2026-10-09: the live run found relais resolved to `crates/relais`, a
+  member crate: Rust had no workspace lift, so each crate of one Cargo
+  workspace would get its own rust-analyzer. `resolve::lift` now lifts
+  Cargo members like uv and pnpm ones (`change.fix-at-the-defects-locus`).
+- 2026-10-09: Behaviour §3, §6 and §9 were edited after the implementation
+  review to match the code: the store is always updated, ids are parsed
+  back with no table, only deaths count against the budget, and a child
+  still starting is never evicted.
+- 2026-10-09: the cap stays 4: two live runs measured 2,983 and 3,356 MiB
+  of rust-analyzer RSS for 4 live servers (9 processes with proc-macro
+  servers), about 750–850 MiB a repository.
 
 ## Verification
 - **Phase 1:** `cargo test route::` → URI extraction (didOpen, definition,
   callHierarchy item), cache, replay without the trigger, LRU at the cap,
   and a server-request id round trip that keeps the pyright
-  `workspace/configuration` log-level guard → <result>
+  `workspace/configuration` log-level guard → `route::` 8 passed,
+  `core::` 21 passed (new: `a_slot_child_dying_retires_the_slot_not_the_session`,
+  `prepare_initialize_asks_for_what_the_gate_needs`); the pyright guard
+  round trip is covered end to end in Phase 3 →
+  as expected
 - **Phase 2/3:** `cargo test --test relay workspace_`, from a non-git
   parent:
   - the client gets exactly one `initialize` reply and, with 2 live fakes,
@@ -233,25 +260,58 @@ Otherwise, workspace mode runs:
   - a `FAKE_FLOOD_MIB` flood on A while B still answers;
   - `fleet-lsp doctor <repo>` run from the parent
 
-  → <result>
+  → 11 `workspace_` tests pass, together in 101 s and the flood one alone
+  in 2 s. Four of them were falsified by breaking what they guard, and
+  each then failed:
+  - `ChildScope::Slot` → `finish(1)`;
+  - no replay;
+  - no `prepare_initialize`;
+  - (resolve) no Cargo lift.
+
+  Two first-run failures were test bugs: `" exit"` matched `recv exit`,
+  and the needle `fleet-lsp:` matched refusal text. A third was a test
+  bug too: `answer()` dropped an answer it read while waiting for another.
+  All three are fixed in the tests.
 - **Single-root regression:** full `make check`, every existing relay test
-  unchanged → <result>
+  unchanged → `make check` rc=0: 120 unit tests, 31 relay tests (the 20
+  single-root ones unchanged), fmt, clippy -D warnings, msrv
 - **Memory:** peak RSS of 4 rust-analyzer children on 4 real repositories
   (relais, fleet-lsp, amont-agent, one more) → the default cap kept or
-  lowered → <result>
-- **Live (Phase 4):** a fresh Claude Code session in `~/Developer/Perso`,
-  with the LSP tool:
-  - `hover` on `relais/crates/relais/src/main.rs` → an answer from relais's
-    rust child;
-  - `workspaceSymbol` "settle_by_agent", directly after that hover with
-    nothing in between → the results include
-    `relais/crates/relais/src/admission/mod.rs`, and the session log names
-    relais;
-  - `documentSymbol` on `fleet-lsp/src/route.rs` → an answer from a second
-    rust child;
-  - the session log lists two child logs
+  lowered → 2,983 MiB peak for 4 live rust-analyzers (relais, fleet-lsp,
+  amont-agent, aval) plus attest evicting relais; cap 4 kept
+- **Live, piloted before the release** (`target/debug/fleet-lsp serve
+  rust` from `~/Developer/Perso`, an LSP client script answering as
+  Claude Code does, real rust-analyzers):
+  - `hover` on `relais/crates/relais/src/main.rs:954` → `fn main()`
+    from relais's server (19 s cold);
+  - `workspaceSymbol settle_by_agent` right after → 0.2 s, results in
+    `relais/crates/relais/src/admission/mod.rs`, `coordinator/mod.rs`
+    and `hook/respond.rs`, and the session log reads
+    `workspace/symbol → ~/Developer/Perso/relais (most recently used)`;
+  - `documentSymbol` on fleet-lsp, amont-agent, aval and attest files →
+    answered by their own servers (13–14 s each);
+  - the fifth repository evicted relais (`evicted … (cap 4)`, then
+    `stopped … exit status: 0`);
+  - `shutdown` and `exit` → exit 0 in 1.0 s, with no rust-analyzer
+    left;
+  - six log files: the session's and one per server;
+  - peak RSS 3,356 MiB for 4 servers (the first run measured 2,983 MiB).
+- **Live in Claude Code (Phase 4, next):** after the release, the same
+  three LSP-tool calls in a fresh session started in `~/Developer/Perso`.
 
-  → <result>
+## Implementation review
+- **Verdict:** approve-with-changes in round 1, then the Delta and a
+  binding round on tree `797861474efd`.
+- **Fixed:**
+  - evictions spent the restart budget (now only deaths count);
+  - refusals from a slot's Core did not name their repository;
+  - an evicted or stopped slot could leave requests unanswered;
+  - the stdin-broken flag;
+  - a swallowed `try_wait` error;
+  - the cap's `holds-until:` comment.
+- **Plan text:** brought in line with the code in this commit. Nothing was
+  kept as deliberate.
+- **Cost:** 69k tokens and 98 s, then 80k and 28 s, then 82k and 10 s.
 
 ## Outcome
 
