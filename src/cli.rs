@@ -75,6 +75,8 @@ pub(crate) enum Command {
     },
     Doctor {
         json: bool,
+        /// The directory to check, else the current one.
+        path: Option<std::path::PathBuf>,
     },
     Help,
     Version,
@@ -88,18 +90,21 @@ pub(crate) const HELP: &str = "\
 fleet-lsp — pinned, ready language servers for Claude Code's LSP tool
 
 Usage:
-  fleet-lsp doctor [--json]
+  fleet-lsp doctor [--json] [PATH]
   fleet-lsp serve <rust|go|python|typescript> --min-version <x.y.z>
   fleet-lsp --help | --version
 
-doctor  Show, for the repository around the current directory, which
-        server each language resolves to, and whether it matches the pin.
+doctor  Show, for the repository around PATH (default: the current
+        directory), which server each language resolves to, and whether
+        it matches the pin.
 serve   Speak LSP on stdin/stdout in front of the pinned server. Claude
         Code runs it from the fleet-lsp plugin; a person never does.
+        Started outside any git repository, it serves every repository
+        whose files it is asked about, one server each.
 
 Exit codes:
   doctor  0 every language verified
-          1 a language refused, or not in a git repository
+          1 a language refused, or PATH is in no git repository
           2 usage error
   serve   0 exit after shutdown, 1 otherwise, 2 usage error or a terminal
 
@@ -113,11 +118,33 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, Usage> {
         [] => Err(Usage("missing command".into())),
         ["-h" | "--help"] | ["help"] => Ok(Command::Help),
         ["-V" | "--version"] => Ok(Command::Version),
-        ["doctor"] => Ok(Command::Doctor { json: false }),
-        ["doctor", "--json"] => Ok(Command::Doctor { json: true }),
-        ["doctor", rest @ ..] => Err(Usage(format!("doctor: unexpected {}", rest.join(" ")))),
+        ["doctor", rest @ ..] => parse_doctor(rest),
         ["serve", rest @ ..] => parse_serve(rest),
         [other, ..] => Err(Usage(format!("unknown command `{other}`"))),
+    }
+}
+
+fn parse_doctor(rest: &[&str]) -> Result<Command, Usage> {
+    let mut json = false;
+    let mut operands = Vec::new();
+    let mut options_done = false;
+    for arg in rest {
+        match *arg {
+            "--" if !options_done => options_done = true,
+            "--json" if !options_done => json = true,
+            a if !options_done && a.starts_with('-') => {
+                return Err(Usage(format!("doctor: unexpected {a}")))
+            }
+            a => operands.push(a),
+        }
+    }
+    match operands.as_slice() {
+        [] => Ok(Command::Doctor { json, path: None }),
+        [path] => Ok(Command::Doctor {
+            json,
+            path: Some(std::path::PathBuf::from(path)),
+        }),
+        [_, extra, ..] => Err(Usage(format!("doctor: unexpected `{extra}`"))),
     }
 }
 
@@ -173,9 +200,22 @@ mod tests {
 
     #[test]
     fn doctor_and_json() {
-        assert_eq!(p(&["doctor"]), Ok(Command::Doctor { json: false }));
-        assert_eq!(p(&["doctor", "--json"]), Ok(Command::Doctor { json: true }));
+        let doctor = |json, path: Option<&str>| {
+            Ok(Command::Doctor {
+                json,
+                path: path.map(std::path::PathBuf::from),
+            })
+        };
+        assert_eq!(p(&["doctor"]), doctor(false, None));
+        assert_eq!(p(&["doctor", "--json"]), doctor(true, None));
         assert!(p(&["doctor", "--jsn"]).is_err());
+        assert_eq!(p(&["doctor", "relais"]), doctor(false, Some("relais")));
+        assert_eq!(
+            p(&["doctor", "relais", "--json"]),
+            doctor(true, Some("relais"))
+        );
+        assert_eq!(p(&["doctor", "--", "-odd"]), doctor(false, Some("-odd")));
+        assert!(p(&["doctor", "a", "b"]).is_err());
     }
 
     #[test]

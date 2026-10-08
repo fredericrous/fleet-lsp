@@ -18,7 +18,7 @@
 //! kills it, and returns — process exit ends any writer still blocked.
 
 use crate::cli::{Lang, Version};
-use crate::core::{Action, Config, Core, Input, ServerFilter};
+use crate::core::{Action, ChildScope, Config, Core, Input, ServerFilter};
 use crate::frame::{write_frame_reporting, Frame, FrameReader};
 use crate::gate::{Barrier, Signal};
 use crate::json::{self, Json};
@@ -35,19 +35,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const QUEUE_CAP: usize = 16 << 20;
-const OWN_CAP: usize = 1 << 20;
-const HUNG: Duration = Duration::from_secs(30);
+pub(crate) const QUEUE_CAP: usize = 16 << 20;
+pub(crate) const OWN_CAP: usize = 1 << 20;
+pub(crate) const HUNG: Duration = Duration::from_secs(30);
 /// rust-analyzer took 7.4 s to exit on stdin EOF (docs/readiness.md).
-const TEARDOWN: Duration = Duration::from_secs(10);
+pub(crate) const TEARDOWN: Duration = Duration::from_secs(10);
 /// 2 × the slowest measured cold start (rust-analyzer on lldap, 185 s).
 pub(crate) const DEFAULT_CEILING: Duration = Duration::from_secs(370);
 /// What the plugin manifest sets as `requestTimeout`: the ceiling + 30 s.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(400);
-const TICK: Duration = Duration::from_millis(200);
+pub(crate) const TICK: Duration = Duration::from_millis(200);
 
 #[derive(Debug)]
-enum Ev {
+pub(crate) enum Ev {
     /// A client frame is waiting in `client_in`.
     ClientQueued,
     Input(Input),
@@ -78,6 +78,24 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         log.line(&note);
     }
     let refusal = version_refusal(min_version);
+    if refusal.is_none() && resolve::git_root(&session_root).is_none() {
+        let (max_children, note) = crate::workspace::max_children_from_env();
+        if let Some(note) = note {
+            log.line(&note);
+        }
+        log.line(&format!(
+            "fleet-lsp {} serve {lang}: session root {}; workspace mode: no git repository here, one server per project used (at most {max_children}); ceiling {}s",
+            env!("CARGO_PKG_VERSION"),
+            tilde(&session_root),
+            ceiling.as_secs()
+        ));
+        let settings = crate::workspace::Settings {
+            lang,
+            ceiling,
+            max_children,
+        };
+        return crate::workspace::serve(settings, log, client, first);
+    }
     let res = if refusal.is_some() {
         None
     } else {
@@ -130,6 +148,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         log_path: tilde(log.path()),
         tsserver_path: res.as_ref().and_then(|r| r.tsserver_path.clone()),
         guard_pyright_log_level: lang == Lang::Python,
+        scope: ChildScope::Session,
     };
     Shell::new(cfg, child, client, log).run(first)
 }
@@ -257,6 +276,7 @@ impl Shell {
                 // After a forwarded `exit` the child should leave on its own;
                 // either way teardown gives it the same grace, then kills it.
                 Action::Exit(code) | Action::AwaitChildThenExit(code) => self.exit = Some(code),
+                Action::ChildDead => unreachable!("single-root mode runs with ChildScope::Session"),
             }
         }
     }
@@ -323,15 +343,15 @@ impl Shell {
         // client stdin → client_in
         let reader = self.client_reader.take().expect("started once");
         let (q, tx) = (Arc::clone(&self.client_in), self.tx.clone());
-        thread::spawn(move || client_reader(reader, &q, &tx));
+        thread::spawn(move || client_reader(reader, &q, |e| tx.send(e).is_ok()));
         // client_out → client stdout
         let (q, tx) = (Arc::clone(&self.client_out), self.tx.clone());
-        thread::spawn(move || client_writer(&q, &tx));
+        thread::spawn(move || client_writer(&q, |e| tx.send(e).is_ok()));
         if let Some(c) = &mut self.child {
             let stdin = c.stdin.take().expect("piped");
             let stdout = c.stdout.take().expect("piped");
             let (q, tx) = (Arc::clone(&self.child_in), self.tx.clone());
-            thread::spawn(move || child_writer(stdin, &q, &tx));
+            thread::spawn(move || child_writer(stdin, &q, |e| tx.send(e).is_ok()));
             let (q, tx, f) = (
                 Arc::clone(&self.client_out),
                 self.tx.clone(),
@@ -342,31 +362,34 @@ impl Shell {
     }
 }
 
-fn client_reader(mut reader: FrameReader<io::Stdin>, q: &Queue, tx: &Sender<Ev>) {
+/// The I/O threads report through `emit`, which returns false once nobody
+/// listens: the thread then stops.
+pub(crate) fn client_reader(
+    mut reader: FrameReader<io::Stdin>,
+    q: &Queue,
+    emit: impl Fn(Ev) -> bool,
+) {
     loop {
         match reader.next_frame() {
             Ok(Some(Frame::Body(b))) => {
-                if q.push(0, b).is_err() || tx.send(Ev::ClientQueued).is_err() {
+                if q.push(0, b).is_err() || !emit(Ev::ClientQueued) {
                     return;
                 }
             }
             Ok(Some(Frame::Oversize { len, scan })) => {
-                if tx
-                    .send(Ev::Input(Input::ClientOversize { len, scan }))
-                    .is_err()
-                {
+                if !emit(Ev::Input(Input::ClientOversize { len, scan })) {
                     return;
                 }
             }
             Ok(None) | Err(_) => {
-                let _ = tx.send(Ev::Input(Input::ClientGone));
+                emit(Ev::Input(Input::ClientGone));
                 return;
             }
         }
     }
 }
 
-fn client_writer(q: &Queue, tx: &Sender<Ev>) {
+pub(crate) fn client_writer(q: &Queue, emit: impl Fn(Ev) -> bool) {
     let stdout = io::stdout();
     while let Some(p) = q.pop() {
         let mut lock = stdout.lock();
@@ -374,18 +397,18 @@ fn client_writer(q: &Queue, tx: &Sender<Ev>) {
         drop(lock);
         q.release(p.lane, p.body.len());
         if !ok {
-            let _ = tx.send(Ev::Input(Input::ClientGone));
+            emit(Ev::Input(Input::ClientGone));
             return;
         }
     }
 }
 
-fn child_writer(mut stdin: ChildStdin, q: &Queue, tx: &Sender<Ev>) {
+pub(crate) fn child_writer(mut stdin: ChildStdin, q: &Queue, emit: impl Fn(Ev) -> bool) {
     while let Some(p) = q.pop() {
         let ok = write_frame_reporting(&mut stdin, &p.body, || q.progress()).is_ok();
         q.release(p.lane, p.body.len());
         if !ok {
-            let _ = tx.send(Ev::ChildStdinBroken);
+            emit(Ev::ChildStdinBroken);
             return;
         }
     }
@@ -411,34 +434,13 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
         let method = s.method.as_deref().unwrap_or("");
         let mut forward = true;
         match s.kind() {
-            Kind::Notification => match method {
-                "experimental/serverStatus" => {
-                    match status_signal(&body) {
-                        Some(sig) => {
-                            let _ = tx.send(Ev::Input(Input::ServerSignal(sig)));
-                        }
-                        None => {
-                            let _ = tx.send(Ev::Log(format!(
-                                "unreadable experimental/serverStatus frame ({} bytes); the gate did not see it",
-                                body.len()
-                            )));
-                        }
-                    }
-                    forward = !f.swallow_status;
+            Kind::Notification => {
+                let (seen, keep) = observe_notification(method, &body, f);
+                if let Some(ev) = seen {
+                    let _ = tx.send(ev);
                 }
-                "$/progress" => {
-                    if let Some(sig) = progress_signal(&body) {
-                        let _ = tx.send(Ev::Input(Input::ServerSignal(sig)));
-                    }
-                    forward = !f.own_progress;
-                }
-                "window/logMessage" => {
-                    if let Some(text) = param_str(&body, "message") {
-                        let _ = tx.send(Ev::Input(Input::ServerSignal(Signal::Log(text))));
-                    }
-                }
-                _ => {}
-            },
+                forward = keep;
+            }
             Kind::Request => {
                 let id = s.id.clone().expect("a request has an id");
                 let keep = (method == "workspace/configuration").then(|| body.clone());
@@ -462,7 +464,38 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
     }
 }
 
-fn parse_small(body: &[u8]) -> Option<Json> {
+/// What a server notification tells the gate (or the log), and whether the
+/// client should see it under `f`.
+pub(crate) fn observe_notification(
+    method: &str,
+    body: &[u8],
+    f: ServerFilter,
+) -> (Option<Ev>, bool) {
+    match method {
+        "experimental/serverStatus" => {
+            let seen = match status_signal(body) {
+                Some(sig) => Ev::Input(Input::ServerSignal(sig)),
+                None => Ev::Log(format!(
+                    "unreadable experimental/serverStatus frame ({} bytes); the gate did not see it",
+                    body.len()
+                )),
+            };
+            (Some(seen), !f.swallow_status)
+        }
+        "$/progress" => (
+            progress_signal(body).map(|sig| Ev::Input(Input::ServerSignal(sig))),
+            !f.own_progress,
+        ),
+        "window/logMessage" => (
+            param_str(body, "message")
+                .map(|text| Ev::Input(Input::ServerSignal(Signal::Log(text)))),
+            true,
+        ),
+        _ => (None, true),
+    }
+}
+
+pub(crate) fn parse_small(body: &[u8]) -> Option<Json> {
     if body.len() > (1 << 20) {
         return None;
     }
@@ -511,7 +544,7 @@ fn progress_signal(body: &[u8]) -> Option<Signal> {
 }
 
 /// `rootUri`, else the first workspace folder, else the process cwd.
-fn session_root(initialize: &[u8]) -> PathBuf {
+pub(crate) fn session_root(initialize: &[u8]) -> PathBuf {
     let from_init = parse_small(initialize).and_then(|m| {
         let p = m.get("params")?;
         p.get("rootUri")
@@ -552,7 +585,7 @@ pub(crate) fn file_uri_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(out).ok()?))
 }
 
-fn ceiling_from_env() -> (Duration, Option<String>) {
+pub(crate) fn ceiling_from_env() -> (Duration, Option<String>) {
     match std::env::var("FLEET_LSP_CEILING_MS") {
         Err(_) => (DEFAULT_CEILING, None),
         Ok(v) => match v.trim().parse::<u64>() {
@@ -577,7 +610,7 @@ fn ceiling_from_env() -> (Duration, Option<String>) {
     }
 }
 
-fn version_refusal(min: Option<Result<Version, String>>) -> Option<String> {
+pub(crate) fn version_refusal(min: Option<Result<Version, String>>) -> Option<String> {
     let own = Version::own();
     match min? {
         Ok(min) if min > own => Some(format!(

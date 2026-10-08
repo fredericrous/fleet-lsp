@@ -2,7 +2,7 @@
 //!
 //! Two roots are kept apart: the *git root* bounds every search, the
 //! *project root* is where a language's manifest, pin and environment live
-//! (a uv or npm/pnpm workspace member is lifted to its workspace root). The
+//! (a Cargo, uv or npm/pnpm workspace member is lifted to its workspace root). The
 //! verified binary is run by absolute path — never looked up on PATH again.
 
 use crate::cli::Lang;
@@ -115,6 +115,43 @@ enum Found {
     One(PathBuf),
     Several(Vec<PathBuf>),
     Nothing,
+}
+
+/// Where a directory lands for one language, before any pin is read:
+/// workspace mode routes each request on it, and resolves a project once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Located {
+    /// No git repository holds it.
+    NoRepository,
+    /// One project: the directory its server runs in.
+    Project {
+        git_root: PathBuf,
+        project_root: PathBuf,
+    },
+    /// Several projects below it, relative to the git root.
+    Several {
+        git_root: PathBuf,
+        projects: Vec<String>,
+    },
+    /// No project of this language around it.
+    Nothing { git_root: PathBuf },
+}
+
+pub(crate) fn locate(lang: Lang, start: &Path) -> Located {
+    let Some(git) = git_root(start) else {
+        return Located::NoRepository;
+    };
+    match project_root(lang, start, &git) {
+        Found::One(project_root) => Located::Project {
+            git_root: git,
+            project_root,
+        },
+        Found::Several(list) => Located::Several {
+            projects: list.iter().map(|p| rel_to(p, &git)).collect(),
+            git_root: git,
+        },
+        Found::Nothing => Located::Nothing { git_root: git },
+    }
 }
 
 /// Is `lang` present at all around `start`? (doctor lists only these)
@@ -244,15 +281,17 @@ fn is_tools_module(dir: &Path) -> bool {
             .is_ok_and(|t| t.lines().any(|l| l.trim() == "module tools"))
 }
 
-/// A uv or npm/pnpm workspace member resolves to the workspace root, where
-/// the pin, the lockfile and the environment live.
+/// A Cargo, uv or npm/pnpm workspace member resolves to the workspace root,
+/// where the pin, the lockfile and the environment live: one server for the
+/// workspace, whichever member's file is asked about first.
 fn lift(lang: Lang, dir: &Path, git: &Path) -> PathBuf {
     for anc in dir.ancestors().skip(1).take_while(|a| a.starts_with(git)) {
         let rel = rel_to(dir, anc);
         let members = match lang {
+            Lang::Rust => cargo_members(anc),
             Lang::Python => uv_members(anc),
             Lang::TypeScript => js_members(anc),
-            _ => None,
+            Lang::Go => None,
         };
         if let Some((include, exclude)) = members {
             if include.iter().any(|g| glob_match(g, &rel))
@@ -263,6 +302,15 @@ fn lift(lang: Lang, dir: &Path, git: &Path) -> PathBuf {
         }
     }
     dir.to_path_buf()
+}
+
+fn cargo_members(dir: &Path) -> Option<(Vec<String>, Vec<String>)> {
+    let text = fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let section = toml_section(&text, "workspace")?;
+    Some((
+        toml_string_array(&section, "members"),
+        toml_string_array(&section, "exclude"),
+    ))
 }
 
 fn uv_members(dir: &Path) -> Option<(Vec<String>, Vec<String>)> {
@@ -1424,6 +1472,24 @@ mod tests {
         assert_eq!(
             root_of(Lang::Python, &t, "packages/skip"),
             Ok(t.p("packages/skip"))
+        );
+    }
+
+    /// FALSIFY: map `Lang::Rust` to `None` in `lift`.
+    #[test]
+    fn cargo_workspace_member_lifts_to_the_workspace_root() {
+        let t = Tree::new("cargows");
+        t.file(
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\nexclude = [\"crates/skip\"]\n",
+        )
+        .file("crates/core/Cargo.toml", "[package]\nname='core'\n")
+        .file("crates/skip/Cargo.toml", "[package]\nname='skip'\n");
+        assert_eq!(root_of(Lang::Rust, &t, "crates/core"), Ok(t.p("")));
+        assert_eq!(root_of(Lang::Rust, &t, "crates/core/src"), Ok(t.p("")));
+        assert_eq!(
+            root_of(Lang::Rust, &t, "crates/skip"),
+            Ok(t.p("crates/skip"))
         );
     }
 

@@ -1,4 +1,6 @@
 //! One log file per session: `$XDG_STATE_HOME/fleet-lsp/<lang>/<utc>-<pid>.log`.
+//! A workspace-mode session adds one per child, for its stderr:
+//! `<utc>-<pid>-<repo>-<slot>.log` beside it.
 //!
 //! No shared file, so parallel sessions never interleave mid-line and there
 //! is no rotation race. A session deletes its own language's logs older than
@@ -39,6 +41,34 @@ impl Log {
             prune(&dir, now);
             File::options().create(true).append(true).open(&path)
         });
+        Log::opened(opened, path)
+    }
+
+    /// A child's log beside this session's: `<session>-<repo>-<slot>.log`,
+    /// the repository's name kept to `[A-Za-z0-9._-]`.
+    pub(crate) fn child(&self, repo: &str, slot: u64) -> Log {
+        let stem = self
+            .path
+            .file_stem()
+            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        let repo: String = repo
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = self
+            .path
+            .with_file_name(format!("{stem}-{repo}-{slot}.log"));
+        let opened = File::options().create(true).append(true).open(&path);
+        Log::opened(opened, path)
+    }
+
+    fn opened(opened: std::io::Result<File>, path: PathBuf) -> Log {
         let file = match opened {
             Ok(f) => Some(f),
             Err(e) => {
@@ -70,11 +100,19 @@ impl Log {
     }
 }
 
-/// The newest session log under `dir` (any language), for `doctor`.
+/// The newest session log under `dir` (any language), for `doctor`: a
+/// child's log (`<utc>-<pid>-<repo>-<slot>.log`) is never the session's.
 pub(crate) fn newest(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(SystemTime, PathBuf)> = None;
     for lang in fs::read_dir(dir).ok()?.flatten() {
         for f in fs::read_dir(lang.path()).into_iter().flatten().flatten() {
+            let is_session = f
+                .path()
+                .file_stem()
+                .is_some_and(|s| s.to_string_lossy().matches('-').count() == 1);
+            if !is_session {
+                continue;
+            }
             let t = f.metadata().and_then(|m| m.modified()).ok();
             if let Some(t) = t {
                 if best.as_ref().map_or(true, |(b, _)| t > *b) {
