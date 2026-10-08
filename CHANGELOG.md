@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0
 
 - **Workspace mode.** A session started outside any git repository (for
   example `~/Developer`) serves every repository it is asked about, instead
@@ -19,6 +19,9 @@
 - A Cargo workspace member resolves to its workspace root (as uv and pnpm
   members already did): one rust-analyzer per workspace, whichever crate's
   file is asked about first.
+- The plugin requires fleet-lsp 0.5.0. Rolling back to 0.4.0: point the
+  marketplace at `ref: v0.4.0`, update the plugin, put the 0.4.0 binary
+  first on PATH; nothing persistent was written.
 
 ## v0.4.0
 
