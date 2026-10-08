@@ -1,6 +1,6 @@
 {
   "name": "fleet-lsp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Pinned, ready language servers: each server verified against the repository's pin, every query held until the server has loaded. Replaces the official gopls-lsp, rust-analyzer-lsp, typescript-lsp and pyright-lsp plugins; turn those off.",
   "author": {
     "name": "Frederic Rousseau"
@@ -12,14 +12,14 @@
   "lspServers": {
     "rust": {
       "command": "fleet-lsp",
-      "args": ["serve", "rust", "--min-version", "0.5.0"],
+      "args": ["serve", "rust", "--min-version", "0.5.1"],
       "extensionToLanguage": { ".rs": "rust" },
       "requestTimeout": 400000,
       "maxRestarts": 2
     },
     "go": {
       "command": "fleet-lsp",
-      "args": ["serve", "go", "--min-version", "0.5.0"],
+      "args": ["serve", "go", "--min-version", "0.5.1"],
       "extensionToLanguage": { ".go": "go" },
       "startupTimeout": 210000,
       "requestTimeout": 400000,
@@ -27,14 +27,14 @@
     },
     "python": {
       "command": "fleet-lsp",
-      "args": ["serve", "python", "--min-version", "0.5.0"],
+      "args": ["serve", "python", "--min-version", "0.5.1"],
       "extensionToLanguage": { ".py": "python", ".pyi": "python" },
       "requestTimeout": 400000,
       "maxRestarts": 2
     },
     "typescript": {
       "command": "fleet-lsp",
-      "args": ["serve", "typescript", "--min-version", "0.5.0"],
+      "args": ["serve", "typescript", "--min-version", "0.5.1"],
       "extensionToLanguage": {
         ".ts": "typescript",
         ".tsx": "typescriptreact",
