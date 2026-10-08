@@ -1,11 +1,15 @@
 # Changelog
 
-## Unreleased
+## v0.4.0
 
 - The plugin adds a five-line note at session start: navigate code with the
   LSP tool, check call sites with `findReferences` before a rename, fix the
   diagnostics that arrive after an edit, and do not fall back to Grep without
   saying so. It is printed only when `fleet-lsp` is on PATH.
+- The plugin requires fleet-lsp 0.4.0 (the binary is unchanged otherwise:
+  plugin and binary versions move together). Rolling back to 0.3.0: point
+  the marketplace at `ref: v0.3.0`, update the plugin, put the 0.3.0 binary
+  first on PATH.
 
 ## v0.3.0
 
