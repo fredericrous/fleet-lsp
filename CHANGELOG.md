@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- The plugin adds a five-line note at session start: navigate code with the
+  LSP tool, check call sites with `findReferences` before a rename, fix the
+  diagnostics that arrive after an edit, and do not fall back to Grep without
+  saying so. It is printed only when `fleet-lsp` is on PATH.
+
 ## v0.3.0
 
 Go's gopls is pinned per repository.
