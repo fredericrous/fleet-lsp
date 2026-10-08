@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/workspace-sessions
 repos: [fleet-lsp]
 adrs: [decisions:ADR-0019]
@@ -185,8 +185,8 @@ Otherwise, workspace mode runs:
         (`FAKE_IGNORE_EXIT`).
       - Fixtures: a non-git parent holding python repos A and B, A2 (same
         basename as A, in another folder) and C (no venv).
-- [ ] Phase 4 (README, CHANGELOG and the hook line shipped with Phases 1–3;
-      the rest is next): plugin `--min-version 0.5.0`; release
+- [x] Phase 4 (README, CHANGELOG and the hook line shipped with Phases 1–3;
+      the rest in #11 and #12, as 0.5.1): plugin `--min-version 0.5.1`; release
       0.5.0 (tag-release); install it the way the repository documents;
       then the live check in a fresh Claude Code session started in
       `~/Developer/Perso`.
@@ -202,8 +202,13 @@ Otherwise, workspace mode runs:
 - 2026-10-08: cap of 4 children per language, configurable and LRU, because
   rust-analyzer can hold over 1 GB per repository. The default is
   re-checked against the RSS measured in Verification.
-- 2026-10-08: rollback is plugin `--min-version 0.4.0` plus installing
-  0.4.0. Nothing persistent is written, so nothing needs migrating.
+- 2026-10-08: rollback is to point the marketplace at `ref: v0.4.0`,
+  update the plugin, and put the 0.4.0 binary first on PATH. Nothing
+  persistent is written, so nothing needs migrating.
+- 2026-10-09: released as 0.5.1, not 0.5.0. 0.5.0's `brew` check failed
+  because doctor's refusal moved to stderr and the tap formula's test read
+  stdout. 0.5.1 fixed `packaging/fleet-lsp.rb`, and the tap's copy was
+  fixed in homebrew-tap#9. The plugin pins `--min-version 0.5.1`.
 - 2026-10-09: workspace mode is its own shell (`src/workspace.rs`) rather
   than `Shell` grown to `Vec<ChildSlot>`, so single-root mode keeps its
   code path byte for byte; the two share the client threads, the child
@@ -296,8 +301,17 @@ Otherwise, workspace mode runs:
     left;
   - six log files: the session's and one per server;
   - peak RSS 3,356 MiB for 4 servers (the first run measured 2,983 MiB).
-- **Live in Claude Code (Phase 4, next):** after the release, the same
-  three LSP-tool calls in a fresh session started in `~/Developer/Perso`.
+- **Live in Claude Code (Phase 4):** with fleet-lsp 0.5.1 and plugin 0.5.1
+  installed, a fresh headless session (`claude -p`, LSP tool only) started
+  in `~/Developer/Perso`:
+  - `hover` on relais `main.rs:954` → answered;
+  - `workspaceSymbol settle_by_agent` → 6 symbols in relais;
+  - `documentSymbol` on `fleet-lsp/src/route.rs` → `OWN_PREFIX`, `own_id`, …
+
+  The session log reads `fleet-lsp 0.5.1 serve rust: session root
+  ~/Developer/Perso; workspace mode`, then `start …/relais (slot 1)`,
+  `workspace/symbol → ~/Developer/Perso/relais` and
+  `start …/fleet-lsp (slot 2)`, with one child log for each.
 
 ## Implementation review
 - **Verdict:** approve-with-changes in round 1, then the Delta and a
@@ -314,5 +328,19 @@ Otherwise, workspace mode runs:
 - **Cost:** 69k tokens and 98 s, then 80k and 28 s, then 82k and 10 s.
 
 ## Outcome
+Shipped in 0.5.1 (#10, #11, #12; tap fredericrous/homebrew-tap#9). A
+session started above several repositories now gets each repository's
+pinned server, with single-root sessions unchanged.
+
+The 0.5.0 release stopped at its `brew install` check, and so did 0.5.1's
+first run. 0.5.0 moved doctor's refusal to stderr, and the tap formula's
+test read stdout. That test lives in the tap repository:
+`scripts/bump-tap.py` rewrites only the version, URLs and checksums, so
+fixing `packaging/fleet-lsp.rb` (#12) was not enough until the tap's own
+copy was fixed (tap #9) and the failed jobs re-run. The workflow did its
+job: the plugin's `release` branch never moved ahead of an installable
+binary. 0.5.0's binaries exist, but its plugin never shipped.
+
+The live run is what found the missing Cargo workspace lift.
 
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,language-rust,tui,unix body-sha=733a175da239 -->
