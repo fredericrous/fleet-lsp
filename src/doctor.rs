@@ -1,5 +1,6 @@
-//! `fleet-lsp doctor [--json]`: what each language in the repository around
-//! the current directory resolves to, and whether it matches the pin.
+//! `fleet-lsp doctor [--json] [PATH]`: what each language in the repository
+//! around PATH (default: the current directory) resolves to, and whether it
+//! matches the pin.
 
 use crate::cli::Lang;
 use crate::json::Json;
@@ -12,17 +13,41 @@ use std::process::Command;
 const CLAUDE_MIN: &str = "2.1.288";
 const WIDTH: usize = 80;
 
-pub(crate) fn run(json: bool) -> (String, u8) {
+/// What doctor prints: the report on stdout, talk on stderr, and the exit code.
+pub(crate) struct Report {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) code: u8,
+}
+
+pub(crate) fn run(json: bool, path: Option<&Path>) -> Report {
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    let Some(git) = resolve::git_root(&cwd) else {
-        let msg = format!("not in a git repository: {}", tilde(&cwd));
+    let start = path.map_or_else(|| cwd.clone(), |p| cwd.join(p));
+    let Some(git) = resolve::git_root(&start) else {
+        let msg = format!("not in a git repository: {}", tilde(&start));
+        // Outside every repository with no PATH is where a workspace-mode
+        // session starts: say which repository to name.
+        let hint = if path.is_none() {
+            "\nworkspace mode: doctor checks one repository; run `fleet-lsp doctor <repo>`"
+        } else {
+            ""
+        };
         return if json {
             let j = Json::obj().set("error", msg.as_str());
-            (format!("{j}\n"), 1)
+            Report {
+                stdout: format!("{j}\n"),
+                stderr: String::new(),
+                code: 1,
+            }
         } else {
-            (format!("{msg}\n"), 1)
+            Report {
+                stdout: String::new(),
+                stderr: format!("{msg}{hint}\n"),
+                code: 1,
+            }
         };
     };
+    let cwd = start;
     let found: Vec<Resolution> = Lang::ALL
         .into_iter()
         .filter(|l| resolve::present(*l, &cwd))
@@ -47,7 +72,11 @@ pub(crate) fn run(json: bool) -> (String, u8) {
     } else {
         render_text(&found, &git, claude.as_deref())
     };
-    (text, code)
+    Report {
+        stdout: text,
+        stderr: String::new(),
+        code,
+    }
 }
 
 fn rel(path: &Path, git: &Path) -> String {

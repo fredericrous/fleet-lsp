@@ -33,6 +33,18 @@ pub(crate) struct Config {
     /// `workspace/configuration` replies, or pyright's barrier line never
     /// arrives (docs/readiness.md).
     pub(crate) guard_pyright_log_level: bool,
+    /// What the child's death ends.
+    pub(crate) scope: ChildScope,
+}
+
+/// What a child's exit or hang ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildScope {
+    /// Single-root mode: the child is the session.
+    Session,
+    /// Workspace mode: one repository's child among several. Its death
+    /// fails its own requests and retires it; the session goes on.
+    Slot,
 }
 
 /// What the shell observed.
@@ -77,6 +89,8 @@ pub(crate) enum Action {
     Exit(u8),
     /// `exit` was forwarded: wait for the child, then exit with this code.
     AwaitChildThenExit(u8),
+    /// Workspace mode: this slot's child is gone and its requests failed.
+    ChildDead,
 }
 
 /// Decided at `initialize`, applied by the child-stdout reader.
@@ -167,7 +181,7 @@ impl Core {
                 );
                 out.push(Action::Log(msg.clone()));
                 self.fail_everything(&msg, &mut out);
-                self.finish(1, &mut out);
+                self.end_child(&mut out);
             }
             Input::Tick => self.tick(now, &mut out),
         }
@@ -222,42 +236,43 @@ impl Core {
             )));
             return;
         }
-        let Ok(text) = std::str::from_utf8(&body) else {
+        let Some(msg) = std::str::from_utf8(&body)
+            .ok()
+            .and_then(|t| json::parse(t).ok())
+        else {
             out.push(Action::ToChild(body));
             return;
         };
-        let Ok(mut msg) = json::parse(text) else {
-            out.push(Action::ToChild(body));
-            return;
-        };
-        let mut filter = ServerFilter::default();
-        {
-            let params = msg.obj_at(&["params"]);
-            let params = params
-                .entry("capabilities".into())
-                .or_insert_with(Json::obj);
-            if self.cfg.barrier == Barrier::RustAnalyzer {
-                params
-                    .obj_at(&["experimental"])
-                    .insert("serverStatusNotification".into(), Json::Bool(true));
-                filter.swallow_status = true;
-            }
-            let window = params.obj_at(&["window"]);
-            if window.get("workDoneProgress") != Some(&Json::Bool(true)) {
-                window.insert("workDoneProgress".into(), Json::Bool(true));
-                filter.own_progress = true;
-            }
-        }
-        if let Some(path) = &self.cfg.tsserver_path {
-            msg.obj_at(&["params", "initializationOptions", "tsserver"])
-                .insert("path".into(), Json::Str(path.clone()));
-        }
+        let (msg, filter) = prepare_initialize(&self.cfg, msg);
         self.filter = filter;
         out.push(Action::SetFilter(filter));
         out.push(Action::ToChild(msg.to_string().into_bytes()));
         if let Some(id) = scan.id.clone() {
             self.inflight.insert(id);
         }
+    }
+
+    /// Workspace mode: the shell sent this slot's `initialize` itself (see
+    /// `prepare_initialize`); this is the filter it decided.
+    pub(crate) fn adopt_filter(&mut self, filter: ServerFilter) {
+        self.filter = filter;
+    }
+
+    /// Workspace mode, when the shell ends a slot itself (an eviction that
+    /// stopped, a refused `initialize`): every request still held or in
+    /// flight is failed with `msg`. A slot whose child died has none left.
+    pub(crate) fn fail_all(&mut self, msg: &str) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.fail_everything(msg, &mut out);
+        out
+    }
+
+    /// Workspace mode, before the shell's own `shutdown` reaches the child:
+    /// held notifications are returned for the child, held requests failed.
+    pub(crate) fn drain_for_shutdown(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.drain_held_for_shutdown(&mut out);
+        out
     }
 
     fn request(&mut self, body: Vec<u8>, id: Option<Id>, now: Instant, out: &mut Vec<Action>) {
@@ -559,7 +574,18 @@ impl Core {
         }
         let msg = format!("fleet-lsp: {}: the server exited ({how})", self.cfg.lang);
         self.fail_everything(&msg, out);
-        self.finish(1, out);
+        self.end_child(out);
+    }
+
+    /// The child is gone: the session ends with it, or only its slot.
+    fn end_child(&mut self, out: &mut Vec<Action>) {
+        match self.cfg.scope {
+            ChildScope::Session => self.finish(1, out),
+            ChildScope::Slot => {
+                self.done = true;
+                out.push(Action::ChildDead);
+            }
+        }
     }
 
     fn fail_everything(&mut self, msg: &str, out: &mut Vec<Action>) {
@@ -577,10 +603,47 @@ impl Core {
     }
 }
 
+/// The client's `initialize`, rewritten for the child: rust-analyzer's
+/// status notifications, `window.workDoneProgress` (answered by fleet-lsp
+/// when the client lacks it) and the tsserver path. The filter tells the
+/// child-stdout reader what fleet-lsp asked for that the client did not.
+pub(crate) fn prepare_initialize(cfg: &Config, mut msg: Json) -> (Json, ServerFilter) {
+    let mut filter = ServerFilter::default();
+    {
+        let params = msg.obj_at(&["params"]);
+        let params = params
+            .entry("capabilities".into())
+            .or_insert_with(Json::obj);
+        if cfg.barrier == Barrier::RustAnalyzer {
+            params
+                .obj_at(&["experimental"])
+                .insert("serverStatusNotification".into(), Json::Bool(true));
+            filter.swallow_status = true;
+        }
+        let window = params.obj_at(&["window"]);
+        if window.get("workDoneProgress") != Some(&Json::Bool(true)) {
+            window.insert("workDoneProgress".into(), Json::Bool(true));
+            filter.own_progress = true;
+        }
+    }
+    if let Some(path) = &cfg.tsserver_path {
+        msg.obj_at(&["params", "initializationOptions", "tsserver"])
+            .insert("path".into(), Json::Str(path.clone()));
+    }
+    (msg, filter)
+}
+
 /// The capabilities the refusal stub advertises: the ones Claude Code's LSP
 /// tool calls, so its requests reach the stub and get the refusal text
 /// instead of being rejected locally.
 fn stub_capabilities() -> String {
+    capabilities("fleet-lsp (refusing)")
+}
+
+/// What fleet-lsp answers `initialize` with when it answers it itself (the
+/// refusal stub, workspace mode): the operations Claude Code's LSP tool
+/// sends, with full document sync, which every server accepts.
+pub(crate) fn capabilities(server_name: &str) -> String {
     let caps = Json::obj()
         .set("textDocumentSync", 1)
         .set("definitionProvider", true)
@@ -595,7 +658,7 @@ fn stub_capabilities() -> String {
         .set(
             "serverInfo",
             Json::obj()
-                .set("name", "fleet-lsp (refusing)")
+                .set("name", server_name)
                 .set("version", env!("CARGO_PKG_VERSION")),
         )
         .to_string()
@@ -675,6 +738,7 @@ mod tests {
             log_path: "/log".into(),
             tsserver_path: None,
             guard_pyright_log_level: false,
+            scope: ChildScope::Session,
         }
     }
 
@@ -893,6 +957,50 @@ mod tests {
         let out = c.step(Input::ChildExited("signal 9".into()), t);
         assert!(texts(&out)[0].contains("the server exited (signal 9)"));
         assert!(out.contains(&Action::Exit(1)));
+    }
+
+    /// FALSIFY: map `ChildScope::Slot` to `finish(1)` in `end_child`.
+    #[test]
+    fn a_slot_child_dying_retires_the_slot_not_the_session() {
+        let mut cf = cfg(Barrier::None);
+        cf.scope = ChildScope::Slot;
+        let mut c = Core::new(cf);
+        let t = Instant::now();
+        c.step(client(REQ1), t);
+        let out = c.step(Input::ChildExited("signal 9".into()), t);
+        assert!(texts(&out)[0].contains("the server exited (signal 9)"));
+        assert!(out.contains(&Action::ChildDead));
+        assert!(!out.iter().any(|a| matches!(a, Action::Exit(_))));
+        let hung = Core::new(Config {
+            scope: ChildScope::Slot,
+            ..cfg(Barrier::None)
+        })
+        .step(Input::ChildHung, t);
+        assert!(hung.contains(&Action::ChildDead));
+        assert!(!hung.iter().any(|a| matches!(a, Action::Exit(_))));
+    }
+
+    #[test]
+    fn prepare_initialize_asks_for_what_the_gate_needs() {
+        let msg = json::parse(
+            r#"{"id":"fleet-lsp:1","method":"initialize","params":{"capabilities":{}}}"#,
+        )
+        .expect("json");
+        let (msg, filter) = prepare_initialize(&cfg(Barrier::RustAnalyzer), msg);
+        let text = msg.to_string();
+        assert!(
+            text.contains(r#""serverStatusNotification":true"#),
+            "{text}"
+        );
+        assert!(text.contains(r#""workDoneProgress":true"#), "{text}");
+        assert!(text.contains(r#""id":"fleet-lsp:1""#), "{text}");
+        assert_eq!(
+            filter,
+            ServerFilter {
+                swallow_status: true,
+                own_progress: true
+            }
+        );
     }
 
     #[test]

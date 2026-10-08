@@ -14,7 +14,9 @@ mod out;
 mod queue;
 mod relay;
 mod resolve;
+mod route;
 mod scan;
+mod workspace;
 
 use cli::{Command, Usage};
 use std::process::ExitCode;
@@ -30,10 +32,13 @@ fn main() -> ExitCode {
             out::stdout(&format!("fleet-lsp {}\n", cli::Version::own()));
             ExitCode::SUCCESS
         }
-        Ok(Command::Doctor { json }) => {
-            let (text, code) = doctor::run(json);
-            out::stdout(&text);
-            ExitCode::from(code)
+        Ok(Command::Doctor { json, path }) => {
+            let report = doctor::run(json, path.as_deref());
+            out::stdout(&report.stdout);
+            if !report.stderr.is_empty() {
+                eprint!("{}", report.stderr);
+            }
+            ExitCode::from(report.code)
         }
         Ok(Command::Serve { lang, min_version }) => ExitCode::from(relay::serve(lang, min_version)),
         Err(Usage(msg)) => {

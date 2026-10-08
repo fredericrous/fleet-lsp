@@ -20,8 +20,23 @@ FAKE_FLAVOR=ra    behave like rust-analyzer instead: readiness is
                   `experimental/serverStatus` quiescent, with
 FAKE_RA_HEALTH    ok | warning | error (default ok) and
 FAKE_RA_MESSAGE   the status message
+FAKE_IGNORE_SHUTDOWN  never answer `shutdown`
+FAKE_IGNORE_EXIT  stay up after `exit` and after EOF
+FAKE_CRASH_AT_START  exit 4 on `initialize`, before answering it
+
+A `.fake-env` file in the working directory (one KEY=VALUE per line) sets
+these per repository, for the workspace-mode tests that run several fakes
+under one fleet-lsp. Every answer to a request carries `cwd`, so a test
+sees which fake answered. Events added for those tests: `root <rootUri>`,
+`init-params <params as sorted JSON>`, `open <uri> <version>`.
 """
 import json, os, sys, time, threading
+
+if os.path.exists(".fake-env"):
+    for line in open(".fake-env").read().splitlines():
+        key, _, value = line.partition("=")
+        if key:
+            os.environ[key] = value
 
 EVENTS = os.environ.get("FAKE_EVENTS")
 out_lock = threading.Lock()
@@ -112,6 +127,12 @@ def become_ready(delay):
               "params": {"type": 3, "message": "Found 3 source files"}})
 
 
+def stay_up():
+    event("ignoring-exit")
+    while True:
+        time.sleep(3600)
+
+
 def main():
     event("pid", str(os.getpid()))
     rate = os.environ.get("FAKE_SLOW_READ")
@@ -122,6 +143,8 @@ def main():
         m = r.message()
         if m is None:
             event("eof")
+            if os.environ.get("FAKE_IGNORE_EXIT"):
+                stay_up()
             sys.exit(0 if shutdown else 1)
         method = m.get("method")
         mid = m.get("id")
@@ -130,6 +153,12 @@ def main():
         else:
             event("reply", json.dumps(mid))
         if method == "initialize":
+            params = m.get("params") or {}
+            event("root", str(params.get("rootUri")))
+            event("init-params", json.dumps(params, sort_keys=True, separators=(",", ":")))
+            if os.environ.get("FAKE_CRASH_AT_START"):
+                event("crash")
+                os._exit(4)
             send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {"referencesProvider": True}}})
         elif method == "initialized":
             if os.environ.get("FAKE_EXIT_AFTER"):
@@ -152,14 +181,20 @@ def main():
             if not os.environ.get("FAKE_NEVER_READY"):
                 threading.Thread(target=become_ready,
                                  args=(float(os.environ.get("FAKE_READY_DELAY", "0")),), daemon=True).start()
+        elif method == "textDocument/didOpen":
+            doc = (m.get("params") or {}).get("textDocument") or {}
+            event("open", f"{doc.get('uri')} {doc.get('version')}")
         elif method == "shutdown":
             shutdown = True
-            send({"jsonrpc": "2.0", "id": mid, "result": None})
+            if not os.environ.get("FAKE_IGNORE_SHUTDOWN"):
+                send({"jsonrpc": "2.0", "id": mid, "result": None})
         elif method == "exit":
             event("exit")
+            if os.environ.get("FAKE_IGNORE_EXIT"):
+                stay_up()
             sys.exit(0 if shutdown else 1)
         elif mid is not None and method:
-            send({"jsonrpc": "2.0", "id": mid, "result": [{"uri": "file:///answer", "range": {
+            send({"jsonrpc": "2.0", "id": mid, "result": [{"uri": "file:///answer", "cwd": os.getcwd(), "range": {
                 "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}]})
 
 

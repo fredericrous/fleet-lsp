@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Workspace mode.** A session started outside any git repository (for
+  example `~/Developer`) serves every repository it is asked about, instead
+  of answering `not in a git repository` to everything. Each request goes to
+  the pinned server of the project its file belongs to, started on its first
+  request and gated as before. At most `FLEET_LSP_MAX_CHILDREN` (default 4)
+  servers per language; the least recently used is shut down first. A
+  server that dies fails only its own requests, and is started again at
+  most twice. `workspaceSymbol` searches the repository used most recently.
+  A session started inside a repository behaves exactly as before.
+- Refusals in workspace mode name the repository they are about and end
+  with `details: fleet-lsp doctor <repo>`.
+- `fleet-lsp doctor [PATH]` checks the repository around PATH. Without one,
+  outside any repository, it says on stderr which command to run.
+- Each server in workspace mode has its own log, with its stderr.
+- A Cargo workspace member resolves to its workspace root (as uv and pnpm
+  members already did): one rust-analyzer per workspace, whichever crate's
+  file is asked about first.
+
 ## v0.4.0
 
 - The plugin adds a five-line note at session start: navigate code with the

@@ -37,27 +37,7 @@ impl Fixture {
     fn new(name: &str, with_venv: bool) -> Fixture {
         let dir = std::env::temp_dir().join(format!("fleet-lsp-it-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join(".git")).unwrap();
-        fs::write(
-            dir.join("pyproject.toml"),
-            "[dependency-groups]\ndev = [\"pyright==1.1.411\"]\n",
-        )
-        .unwrap();
-        if with_venv {
-            let info = dir.join(".venv/lib/python3.13/site-packages/pyright-1.1.411.dist-info");
-            fs::create_dir_all(&info).unwrap();
-            fs::write(info.join("METADATA"), "Name: pyright\nVersion: 1.1.411\n").unwrap();
-            let bin = dir.join(".venv/bin");
-            fs::create_dir_all(&bin).unwrap();
-            let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
-            let script = bin.join("pyright-langserver");
-            fs::write(
-                &script,
-                format!("#!/bin/sh\nexec python3 -u '{}' \"$@\"\n", fake.display()),
-            )
-            .unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        python_repo(&dir, with_venv);
         Fixture { dir }
     }
 
@@ -67,54 +47,68 @@ impl Fixture {
     fn rust(name: &str) -> Fixture {
         let dir = std::env::temp_dir().join(format!("fleet-lsp-it-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join(".git")).unwrap();
-        fs::create_dir_all(dir.join("src")).unwrap();
-        fs::write(
-            dir.join("Cargo.toml"),
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.join("rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"1.94.1\"\n",
-        )
-        .unwrap();
-        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
-        let ra_dir = dir.join("toolchains/1.94.1-x86_64-fake/bin");
-        fs::create_dir_all(&ra_dir).unwrap();
-        let ra = ra_dir.join("rust-analyzer");
-        let script = |p: &Path, body: String| {
-            fs::write(p, body).unwrap();
-            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        script(
-            &ra,
-            format!("#!/bin/sh\nexec python3 -u '{}' \"$@\"\n", fake.display()),
-        );
-        fs::create_dir_all(dir.join("fakebin")).unwrap();
-        script(
-            &dir.join("fakebin/rustup"),
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\n  which) echo '{}' ;;\n  run) echo 'rustc 1.94.1 (fake)' ;;\n  *) exit 1 ;;\nesac\n",
-                ra.display()
-            ),
-        );
+        rust_repo(&dir);
         Fixture { dir }
     }
 
     /// PATH with this fixture's fake tools first.
     fn path_env(&self) -> String {
-        format!(
-            "{}:{}",
-            self.dir.join("fakebin").display(),
-            std::env::var("PATH").unwrap()
-        )
+        fake_path(&self.dir)
     }
 
     fn events(&self) -> PathBuf {
         self.dir.join("events.log")
     }
+}
 
+/// PATH with `dir`'s fake tools first.
+fn fake_path(dir: &Path) -> String {
+    format!(
+        "{}:{}",
+        dir.join("fakebin").display(),
+        std::env::var("PATH").unwrap()
+    )
+}
+
+/// A Cargo project whose `rustup` (`fakebin/`, first on PATH) points at the
+/// fake server in rust-analyzer flavour, under a toolchain path, so the real
+/// rust resolver verifies it.
+fn rust_repo(dir: &Path) {
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.94.1\"\n",
+    )
+    .unwrap();
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
+    let ra_dir = dir.join("toolchains/1.94.1-x86_64-fake/bin");
+    fs::create_dir_all(&ra_dir).unwrap();
+    let ra = ra_dir.join("rust-analyzer");
+    let script = |p: &Path, body: String| {
+        fs::write(p, body).unwrap();
+        fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(
+        &ra,
+        format!("#!/bin/sh\nexec python3 -u '{}' \"$@\"\n", fake.display()),
+    );
+    fs::create_dir_all(dir.join("fakebin")).unwrap();
+    script(
+        &dir.join("fakebin/rustup"),
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  which) echo '{}' ;;\n  run) echo 'rustc 1.94.1 (fake)' ;;\n  *) exit 1 ;;\nesac\n",
+            ra.display()
+        ),
+    );
+}
+
+impl Fixture {
     fn event_lines(&self) -> Vec<String> {
         fs::read_to_string(self.events())
             .unwrap_or_default()
@@ -128,6 +122,31 @@ impl Fixture {
             l.split_once(" pid ")
                 .map(|(_, p)| p.trim().parse().unwrap())
         })
+    }
+}
+
+/// A git repository with a pinned pyright; with a venv, its server is the fake.
+fn python_repo(dir: &Path, with_venv: bool) {
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::write(
+        dir.join("pyproject.toml"),
+        "[dependency-groups]\ndev = [\"pyright==1.1.411\"]\n",
+    )
+    .unwrap();
+    if with_venv {
+        let info = dir.join(".venv/lib/python3.13/site-packages/pyright-1.1.411.dist-info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(info.join("METADATA"), "Name: pyright\nVersion: 1.1.411\n").unwrap();
+        let bin = dir.join(".venv/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
+        let script = bin.join("pyright-langserver");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nexec python3 -u '{}' \"$@\"\n", fake.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -150,6 +169,8 @@ struct Session {
     proc: Child,
     stdin: Option<ChildStdin>,
     rx: Option<Receiver<(Instant, String)>>,
+    /// Every frame `recv_until` read, matching or not.
+    seen: std::cell::RefCell<Vec<String>>,
 }
 
 fn frame(body: &str) -> Vec<u8> {
@@ -203,11 +224,19 @@ impl Session {
     }
 
     fn start_args(fx: &Fixture, env: &[(&str, &str)], read_stdout: bool, args: &[&str]) -> Session {
+        let events = fx.events();
+        let mut all = vec![("FAKE_EVENTS", events.to_str().unwrap())];
+        all.extend_from_slice(env);
+        Session::start_in(&fx.dir, &all, read_stdout, args)
+    }
+
+    /// fleet-lsp started in `dir`, its logs under `dir/state`.
+    fn start_in(dir: &Path, env: &[(&str, &str)], read_stdout: bool, args: &[&str]) -> Session {
         let mut cmd = Command::new(BIN);
         cmd.args(args)
-            .current_dir(&fx.dir)
-            .env("XDG_STATE_HOME", fx.dir.join("state"))
-            .env("FAKE_EVENTS", fx.events())
+            .current_dir(dir)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env_remove("FAKE_EVENTS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -224,7 +253,12 @@ impl Session {
             std::mem::forget(stdout);
             None
         };
-        Session { proc, stdin, rx }
+        Session {
+            proc,
+            stdin,
+            rx,
+            seen: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
     fn send(&mut self, body: &str) {
@@ -250,8 +284,12 @@ impl Session {
         loop {
             let left = deadline.checked_duration_since(Instant::now())?;
             match rx.recv_timeout(left) {
-                Ok((t, body)) if pred(&body) => return Some((t, body)),
-                Ok(_) => continue,
+                Ok((t, body)) => {
+                    self.seen.borrow_mut().push(body.clone());
+                    if pred(&body) {
+                        return Some((t, body));
+                    }
+                }
                 Err(_) => return None,
             }
         }
@@ -935,4 +973,627 @@ fn rust_health_warning_answers_and_shows_the_warning() {
         .recv_until(Duration::from_secs(10), |b| b.contains(r#""id":7"#))
         .unwrap();
     assert!(body.contains("file:///answer"), "{body}");
+}
+
+// ------------------------------------------------------------- workspace mode
+
+/// A directory that is no git repository and holds several: a session
+/// started here serves each of them (workspace mode). Each repository's
+/// fake reads its own `.fake-env` and logs to its own `events.log`.
+struct Workspace {
+    dir: PathBuf,
+}
+
+impl Workspace {
+    fn new(name: &str) -> Workspace {
+        let dir = std::env::temp_dir().join(format!("fleet-lsp-ws-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Workspace { dir }
+    }
+
+    fn python(&self, rel: &str, env: &[(&str, &str)]) -> PathBuf {
+        let repo = self.dir.join(rel);
+        python_repo(&repo, true);
+        fake_env(&repo, env);
+        fs::write(repo.join("x.py"), "x = 1\n").unwrap();
+        repo
+    }
+
+    fn rust(&self, rel: &str) -> PathBuf {
+        let repo = self.dir.join(rel);
+        rust_repo(&repo);
+        fake_env(&repo, &[("FAKE_FLAVOR", "ra")]);
+        fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        repo
+    }
+
+    fn start(&self, env: &[(&str, &str)], lang: &str) -> Session {
+        let mut s = Session::start_in(
+            &self.dir,
+            env,
+            true,
+            &["serve", lang, "--min-version", "0.1.0"],
+        );
+        s.initialize(&self.dir);
+        s
+    }
+
+    fn logs(&self, lang: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.dir.join("state/fleet-lsp").join(lang))
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+}
+
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        // Every fake this workspace's repositories started, whatever ended them.
+        let mut stack = vec![self.dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.file_name().is_some_and(|n| n == "events.log") {
+                    for pid in pids(&p) {
+                        let _ = Command::new("kill")
+                            .args(["-KILL", &pid.to_string()])
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                } else if p.is_dir() && !p.ends_with(".venv") && !p.ends_with("state") {
+                    stack.push(p);
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn fake_env(repo: &Path, env: &[(&str, &str)]) {
+    let mut text = format!("FAKE_EVENTS={}\n", repo.join("events.log").display());
+    for (k, v) in env {
+        text.push_str(&format!("{k}={v}\n"));
+    }
+    fs::write(repo.join(".fake-env"), text).unwrap();
+}
+
+fn events(repo: &Path) -> Vec<String> {
+    fs::read_to_string(repo.join("events.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn pids(events_log: &Path) -> Vec<u32> {
+    fs::read_to_string(events_log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            l.split_once(" pid ")
+                .and_then(|(_, p)| p.trim().parse().ok())
+        })
+        .collect()
+}
+
+fn count(repo: &Path, needle: &str) -> usize {
+    events(repo).iter().filter(|l| l.contains(needle)).count()
+}
+
+/// Events of one kind (`<time> <kind> <detail>`).
+fn count_kind(repo: &Path, kind: &str) -> usize {
+    events(repo)
+        .iter()
+        .filter(|l| l.split(' ').nth(1) == Some(kind))
+        .count()
+}
+
+fn uri(p: &Path) -> String {
+    format!("file://{}", p.display())
+}
+
+impl Session {
+    fn open(&mut self, file: &Path, language: &str) {
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{}","languageId":"{language}","version":1,"text":"x = 1\n"}}}}}}"#,
+            uri(file)
+        ));
+    }
+
+    fn definition(&mut self, id: u32, file: &Path) {
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"textDocument/definition","params":{{"textDocument":{{"uri":"{}"}},"position":{{"line":0,"character":0}}}}}}"#,
+            uri(file)
+        ));
+    }
+
+    fn symbol(&mut self, id: u32) {
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"workspace/symbol","params":{{"query":"x"}}}}"#
+        ));
+    }
+
+    /// The answer to `id`, already read or still to come.
+    fn answer(&self, id: u32, within: Duration) -> String {
+        let needle = format!(r#""id":{id},"#);
+        if let Some(b) = self.seen.borrow().iter().find(|b| b.contains(&needle)) {
+            return b.clone();
+        }
+        self.recv_until(within, |b| b.contains(&needle))
+            .unwrap_or_else(|| panic!("no answer to {id} within {within:?}"))
+            .1
+    }
+
+    /// Reads what is left for `d`, so `seen` holds every frame.
+    fn drain(&self, d: Duration) {
+        let _ = self.recv_until(d, |_| false);
+    }
+
+    fn frames_with(&self, needle: &str) -> usize {
+        self.seen
+            .borrow()
+            .iter()
+            .filter(|b| b.contains(needle))
+            .count()
+    }
+}
+
+/// The working directory a fake answered from, as the fake saw it.
+fn answered_by(answer: &str, repo: &Path) -> bool {
+    let real = fs::canonicalize(repo).unwrap();
+    answer.contains(&format!(r#""cwd":"{}""#, real.display()))
+}
+
+/// Generous: the light tests run side by side, each with its own fakes.
+const ANSWER: Duration = Duration::from_secs(30);
+
+const SHUTDOWN: &str = r#"{"jsonrpc":"2.0","id":99,"method":"shutdown"}"#;
+const EXIT: &str = r#"{"jsonrpc":"2.0","method":"exit"}"#;
+
+/// FALSIFY: route every request to the first child started.
+#[test]
+fn workspace_each_repository_gets_its_own_server() {
+    let _light = light();
+    let ws = Workspace::new("two");
+    let a = ws.python("a", &[]);
+    // Same name, another folder: its own child and its own log.
+    let a2 = ws.python("other/a", &[]);
+    let mut s = ws.start(&[], "python");
+    s.open(&a.join("x.py"), "python");
+    s.open(&a2.join("x.py"), "python");
+    s.definition(1, &a.join("x.py"));
+    s.definition(2, &a2.join("x.py"));
+    let one = s.answer(1, ANSWER);
+    let two = s.answer(2, ANSWER);
+    assert!(answered_by(&one, &a), "{one}");
+    assert!(answered_by(&two, &a2), "{two}");
+    assert_eq!(count(&a, &format!("root {}", uri(&a))), 1);
+    assert_eq!(count(&a2, &format!("root {}", uri(&a2))), 1);
+    // Each child is told about its own document, once, and no other.
+    assert_eq!(count(&a, &format!("open {} 1", uri(&a.join("x.py")))), 1);
+    assert_eq!(count(&a, " open "), 1);
+    assert_eq!(count(&a2, &format!("open {} 1", uri(&a2.join("x.py")))), 1);
+    assert_eq!(count(&a2, " open "), 1);
+    s.send(SHUTDOWN);
+    let done = s.answer(99, ANSWER);
+    assert!(done.contains(r#""result":null"#), "{done}");
+    s.send(EXIT);
+    assert_eq!(s.wait_exit(Duration::from_secs(15)), Some(0));
+    s.drain(Duration::from_millis(300));
+    assert_eq!(s.frames_with(r#""id":0,"#), 1, "one initialize reply");
+    assert_eq!(s.frames_with(r#""id":99,"#), 1, "one shutdown reply");
+    assert_eq!(
+        s.frames_with(r#""id":"fleet-lsp:"#),
+        0,
+        "no own id reaches the client"
+    );
+    let logs = ws.logs("python");
+    assert_eq!(logs.len(), 3, "{logs:?}");
+    assert!(logs.iter().any(|l| l.ends_with("-a-1.log")), "{logs:?}");
+    assert!(logs.iter().any(|l| l.ends_with("-a-2.log")), "{logs:?}");
+}
+
+#[test]
+fn workspace_refusals_name_their_repository_and_spare_the_others() {
+    let _light = light();
+    let ws = Workspace::new("refusals");
+    let a = ws.python("a", &[]);
+    let c = ws.dir.join("c");
+    python_repo(&c, false);
+    let loose = ws.dir.join("loose.py");
+    fs::write(&loose, "x = 1\n").unwrap();
+    let mut s = ws.start(&[], "python");
+    s.symbol(1);
+    let none = s.answer(1, ANSWER);
+    assert!(
+        none.contains(
+            "fleet-lsp: python: no repository chosen yet; fix: open a file of the repository first"
+        ),
+        "{none}"
+    );
+    s.definition(2, &c.join("x.py"));
+    let refused = s.answer(2, ANSWER);
+    assert!(
+        refused.contains(&format!("fleet-lsp: python: {}: ", c.display())),
+        "{refused}"
+    );
+    assert!(
+        refused.contains(&format!("details: fleet-lsp doctor {}", c.display())),
+        "{refused}"
+    );
+    s.definition(3, &loose);
+    let outside = s.answer(3, ANSWER);
+    assert!(
+        outside.contains(&format!(
+            "fleet-lsp: python: {} is in no git repository; fix: open a file inside a repository",
+            loose.display()
+        )),
+        "{outside}"
+    );
+    s.definition(4, &a.join("x.py"));
+    let ok = s.answer(4, ANSWER);
+    assert!(answered_by(&ok, &a), "{ok}");
+}
+
+/// FALSIFY: send `workspace/symbol` to the first child started.
+#[test]
+fn workspace_symbol_goes_to_the_most_recent_repository() {
+    let _light = light();
+    let ws = Workspace::new("recent");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    s.answer(1, ANSWER);
+    s.definition(2, &b.join("x.py"));
+    s.answer(2, ANSWER);
+    s.symbol(3);
+    assert!(answered_by(&s.answer(3, ANSWER), &b));
+    s.definition(4, &a.join("x.py"));
+    s.answer(4, ANSWER);
+    s.symbol(5);
+    assert!(answered_by(&s.answer(5, ANSWER), &a));
+}
+
+/// FALSIFY: skip the replay in `child_initialized`.
+#[test]
+fn workspace_over_the_cap_evicts_the_least_recent_and_replays_on_return() {
+    let _light = light();
+    let ws = Workspace::new("evict");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[("FLEET_LSP_MAX_CHILDREN", "1")], "python");
+    s.open(&a.join("x.py"), "python");
+    s.definition(1, &a.join("x.py"));
+    s.answer(1, ANSWER);
+    let first_a = pids(&a.join("events.log"))[0];
+    s.definition(2, &b.join("x.py"));
+    assert!(answered_by(&s.answer(2, ANSWER), &b));
+    assert!(
+        gone_within(first_a, Duration::from_secs(15)),
+        "a was not evicted"
+    );
+    assert_eq!(count_kind(&a, "exit"), 1, "{:?}", events(&a));
+    s.definition(3, &a.join("x.py"));
+    assert!(answered_by(&s.answer(3, ANSWER), &a));
+    assert_eq!(count(&a, " root "), 2);
+    // The second child of `a` is told about the document the first one had.
+    assert_eq!(count(&a, &format!("open {} 1", uri(&a.join("x.py")))), 2);
+    s.drain(Duration::from_millis(300));
+    assert_eq!(
+        s.frames_with(r#""id":"fleet-lsp:"#),
+        0,
+        "no own id reaches the client"
+    );
+}
+
+/// FALSIFY: map `ChildScope::Slot` to `finish(1)` in `Core::end_child`.
+#[test]
+fn workspace_a_dying_server_spares_the_others_and_stops_after_three_starts() {
+    let _light = light();
+    let ws = Workspace::new("crash");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[("FAKE_CRASH_AT_START", "1")]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    for id in [2, 4, 5] {
+        s.definition(id, &b.join("x.py"));
+        let died = s.answer(id, ANSWER);
+        assert!(died.contains("the server exited"), "{died}");
+        if id == 2 {
+            s.definition(3, &a.join("x.py"));
+            assert!(answered_by(&s.answer(3, ANSWER), &a));
+        }
+    }
+    s.definition(6, &b.join("x.py"));
+    let spent = s.answer(6, ANSWER);
+    assert!(spent.contains("the server exited 3 times"), "{spent}");
+    assert_eq!(count_kind(&b, "crash"), 3);
+    s.drain(Duration::from_millis(300));
+    assert_eq!(
+        s.frames_with(r#""id":"fleet-lsp:"#),
+        0,
+        "no own id reaches the client"
+    );
+}
+
+/// FALSIFY: drop the slot from `route::client_facing_id`.
+#[test]
+fn workspace_two_servers_asking_with_the_same_id_are_told_apart() {
+    let _light = light();
+    let ws = Workspace::new("ids");
+    let a = ws.python("a", &[("FAKE_CONFIG_FIRST", "1")]);
+    let b = ws.python("b", &[("FAKE_CONFIG_FIRST", "1")]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    s.definition(2, &b.join("x.py"));
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let (_, req) = s
+            .recv_until(ANSWER, |b| b.contains("workspace/configuration"))
+            .expect("a configuration request");
+        let id = req
+            .split(r#""id":""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("a string id")
+            .to_string();
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert!(ids.iter().all(|i| i.ends_with(":900")), "{ids:?}");
+    for id in &ids {
+        s.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":"{id}","result":[{{"logLevel":"Error"}}]}}"#
+        ));
+    }
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    assert!(answered_by(&s.answer(2, ANSWER), &b));
+    // The pyright guard still applies once the id maps back.
+    for repo in [&a, &b] {
+        assert!(
+            events(repo)
+                .iter()
+                .any(|l| l.contains("config-reply") && l.contains("Information")),
+            "{:?}",
+            events(repo)
+        );
+    }
+}
+
+fn four_ignoring(ws: &Workspace, env: &[(&str, &str)]) -> (Session, Vec<PathBuf>) {
+    let repos: Vec<PathBuf> = (0..4).map(|i| ws.python(&format!("r{i}"), env)).collect();
+    let mut s = ws.start(&[], "python");
+    for (i, r) in repos.iter().enumerate() {
+        s.definition(i as u32 + 1, &r.join("x.py"));
+    }
+    for i in 0..4 {
+        s.answer(i + 1, Duration::from_secs(30));
+    }
+    (s, repos)
+}
+
+/// FALSIFY: wait `TEARDOWN` per child instead of once for all.
+#[test]
+fn workspace_exit_is_bounded_when_servers_ignore_it() {
+    let _light = light();
+    let ws = Workspace::new("ignore-exit");
+    let (mut s, repos) = four_ignoring(&ws, &[("FAKE_IGNORE_EXIT", "1")]);
+    let t0 = Instant::now();
+    s.send(SHUTDOWN);
+    s.answer(99, ANSWER);
+    s.send(EXIT);
+    assert_eq!(s.wait_exit(Duration::from_secs(30)), Some(0));
+    let took = t0.elapsed();
+    assert!(took < Duration::from_secs(14), "{took:?}");
+    for r in &repos {
+        assert!(gone_within(
+            pids(&r.join("events.log"))[0],
+            Duration::from_secs(2)
+        ));
+    }
+}
+
+#[test]
+fn workspace_shutdown_is_bounded_when_servers_ignore_shutdown_and_exit() {
+    let _light = light();
+    let ws = Workspace::new("ignore-both");
+    let (mut s, repos) = four_ignoring(
+        &ws,
+        &[("FAKE_IGNORE_SHUTDOWN", "1"), ("FAKE_IGNORE_EXIT", "1")],
+    );
+    let t0 = Instant::now();
+    s.send(SHUTDOWN);
+    let done = s.answer(99, ANSWER);
+    assert!(done.contains(r#""result":null"#), "{done}");
+    s.send(EXIT);
+    assert_eq!(s.wait_exit(Duration::from_secs(30)), Some(0));
+    let took = t0.elapsed();
+    assert!(took < Duration::from_secs(25), "{took:?}");
+    for r in &repos {
+        assert!(gone_within(
+            pids(&r.join("events.log"))[0],
+            Duration::from_secs(2)
+        ));
+    }
+}
+
+/// FALSIFY: send the saved `initialize` without `core::prepare_initialize`.
+#[test]
+fn workspace_a_rust_child_is_initialized_as_a_single_root_one_is() {
+    let _light = light();
+    let ws = Workspace::new("rust");
+    let r = ws.rust("r");
+    let path = fake_path(&r);
+    let main = r.join("src/main.rs");
+    // Single-root first, in the repository itself.
+    {
+        let mut s = Session::start_in(
+            &r,
+            &[("PATH", &path)],
+            true,
+            &["serve", "rust", "--min-version", "0.1.0"],
+        );
+        s.initialize(&r);
+        s.definition(1, &main);
+        s.answer(1, ANSWER);
+        s.send(SHUTDOWN);
+        s.answer(99, ANSWER);
+        s.send(EXIT);
+        assert_eq!(s.wait_exit(Duration::from_secs(15)), Some(0));
+    }
+    let mut s = ws.start(&[("PATH", &path)], "rust");
+    s.definition(1, &main);
+    // Answered only after the fake reports quiescent: the gate saw it.
+    assert!(answered_by(&s.answer(1, ANSWER), &r));
+    let params: Vec<String> = events(&r)
+        .iter()
+        .filter_map(|l| l.split_once(" init-params ").map(|(_, p)| p.to_string()))
+        .collect();
+    assert_eq!(params.len(), 2, "{params:?}");
+    assert!(
+        params[1].contains(r#""serverStatusNotification":true"#),
+        "{}",
+        params[1]
+    );
+    assert!(
+        params[1].contains(r#""workDoneProgress":true"#),
+        "{}",
+        params[1]
+    );
+    // The same params as single-root mode, but for the root itself.
+    let same = Command::new("python3")
+        .args([
+            "-c",
+            "import json,sys\nstrip=lambda p:{k:v for k,v in json.loads(p).items() if k not in ('rootUri','rootPath','workspaceFolders')}\nsys.exit(0 if strip(sys.argv[1])==strip(sys.argv[2]) else 1)",
+            &params[0],
+            &params[1],
+        ])
+        .status()
+        .unwrap();
+    assert!(same.success(), "{params:?}");
+}
+
+#[test]
+fn workspace_a_flooding_server_does_not_stop_another() {
+    let _heavy = heavy();
+    let ws = Workspace::new("flood");
+    let a = ws.python("a", &[("FAKE_FLOOD_MIB", "16")]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    s.definition(2, &b.join("x.py"));
+    assert!(answered_by(&s.answer(2, Duration::from_secs(60)), &b));
+    assert!(answered_by(&s.answer(1, Duration::from_secs(60)), &a));
+}
+
+#[test]
+fn workspace_doctor_names_the_repository_to_check() {
+    let _light = light();
+    let ws = Workspace::new("doctor");
+    let a = ws.python("a", &[]);
+    let out = Command::new(BIN)
+        .arg("doctor")
+        .current_dir(&ws.dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("workspace mode: doctor checks one repository; run `fleet-lsp doctor <repo>`"),
+        "{err}"
+    );
+    let out = Command::new(BIN)
+        .args(["doctor", "a"])
+        .current_dir(&ws.dir)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains(&a.display().to_string()), "{text}");
+    assert!(
+        text.contains("python") && text.contains("verified"),
+        "{text}"
+    );
+}
+
+/// FALSIFY: count every start, not every death, against the budget.
+#[test]
+fn workspace_evictions_never_spend_the_restart_budget() {
+    let _light = light();
+    let ws = Workspace::new("rotate");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[("FLEET_LSP_MAX_CHILDREN", "1")], "python");
+    for round in 0..4u32 {
+        let id = round * 2 + 1;
+        s.definition(id, &a.join("x.py"));
+        assert!(answered_by(&s.answer(id, ANSWER), &a), "round {round}");
+        s.definition(id + 1, &b.join("x.py"));
+        assert!(answered_by(&s.answer(id + 1, ANSWER), &b), "round {round}");
+    }
+    assert_eq!(count_kind(&a, "root"), 4);
+}
+
+/// FALSIFY: map `ChildScope::Slot` to `finish(1)` in `Core::end_child`.
+#[test]
+fn workspace_a_server_killed_mid_request_fails_only_its_own_requests() {
+    let _light = light();
+    let ws = Workspace::new("kill");
+    let a = ws.python("a", &[("FAKE_NEVER_READY", "1")]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(wait_for_event(
+        &a,
+        "recv initialized",
+        Duration::from_secs(20)
+    ));
+    let pid = pids(&a.join("events.log"))[0];
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+    let died = s.answer(1, ANSWER);
+    assert!(died.contains("the server exited"), "{died}");
+    assert!(
+        died.contains(&format!("details: fleet-lsp doctor {}", a.display())),
+        "{died}"
+    );
+    s.definition(2, &b.join("x.py"));
+    assert!(answered_by(&s.answer(2, ANSWER), &b));
+    assert_eq!(s.proc.try_wait().unwrap(), None, "the session goes on");
+}
+
+#[test]
+fn workspace_a_readiness_refusal_names_its_repository() {
+    let _light = light();
+    let ws = Workspace::new("ceiling");
+    let a = ws.python("a", &[("FAKE_NEVER_READY", "1")]);
+    let mut s = ws.start(&[("FLEET_LSP_CEILING_MS", "1500")], "python");
+    s.definition(1, &a.join("x.py"));
+    let late = s.answer(1, ANSWER);
+    assert!(
+        late.contains(&format!("fleet-lsp: python: {}: ", a.display())),
+        "{late}"
+    );
+    assert!(late.contains("server not ready after 1s"), "{late}");
+    assert!(late.contains("details: fleet-lsp doctor"), "{late}");
+}
+
+fn wait_for_event(repo: &Path, needle: &str, d: Duration) -> bool {
+    let deadline = Instant::now() + d;
+    while Instant::now() < deadline {
+        if events(repo).iter().any(|l| l.contains(needle)) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
 }

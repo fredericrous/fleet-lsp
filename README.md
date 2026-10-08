@@ -66,9 +66,19 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
 
 ## Limits
 
-- Claude Code starts one set of servers per session, rooted where the
-  session started. Start the session in the repository (or the project);
-  outside one, every query answers `not in a git repository`.
+- Claude Code starts one server per language per session, where the
+  session started. Started in a repository, that server is the
+  repository's. Started above several (`~/Developer`), fleet-lsp is in
+  *workspace mode*: each request goes to the server of the project its
+  file belongs to, started on that project's first request, at most
+  `FLEET_LSP_MAX_CHILDREN` (default 4) per language, the least recently
+  used shut down first. A project whose server exits three times is
+  refused for the rest of the session, naming its log.
+- In workspace mode, `workspaceSymbol` (which names no file) searches the
+  repository of the file used most recently, and `references` stay inside
+  one repository: answers are never merged across servers.
+- `fleet-lsp doctor` checks one repository: from above several, name it
+  (`fleet-lsp doctor relais`); without one it exits 1 and says so.
 - rust-analyzer reports unfetched dependencies as a *warning*: answers about
   your own code stay right, answers that reach into the missing crates are
   incomplete. fleet-lsp logs it and sends it as `window/showMessage`, but
@@ -85,7 +95,9 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
 - A `tools/go.mod` cannot serve a project with a `vendor/` directory or a
   `go.work` in scope (`-modfile` cannot run with either): pin gopls in that
   module's go.mod instead.
-- One log file per session under `~/.local/state/fleet-lsp/<lang>/`.
+- One log file per session under `~/.local/state/fleet-lsp/<lang>/`; in
+  workspace mode, one more per server (`<session>-<repo>-<slot>.log`, its
+  stderr), each listed in the session's log.
 
 ## Uninstall
 
