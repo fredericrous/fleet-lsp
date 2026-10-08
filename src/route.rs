@@ -222,6 +222,27 @@ impl<K: PartialEq + Clone> Recent<K> {
     }
 }
 
+/// A `-32803` error from a slot's `Core` (readiness, ceiling, a dead
+/// server), its message moved under `repo`; `None` for anything else.
+pub(crate) fn name_repository(body: &[u8], lang: &str, repo: &str) -> Option<Vec<u8>> {
+    let mut msg = crate::json::parse(std::str::from_utf8(body).ok()?).ok()?;
+    let Json::Obj(top) = &mut msg else {
+        return None;
+    };
+    let Some(Json::Obj(error)) = top.get_mut("error") else {
+        return None;
+    };
+    if error.get("code") != Some(&Json::Int(crate::core::REQUEST_FAILED)) {
+        return None;
+    }
+    let text = error.get("message")?.as_str()?.to_string();
+    error.insert(
+        "message".into(),
+        Json::Str(refusal::of_repository(lang, repo, &text)),
+    );
+    Some(msg.to_string().into_bytes())
+}
+
 /// The refusals workspace mode answers with, in the single-root form
 /// `fleet-lsp: <lang>: <reason>; fix: <action>`, each naming what it is about.
 pub(crate) mod refusal {
@@ -377,6 +398,32 @@ mod tests {
         assert_eq!(recent.evictable(|_| true, &"d"), Some(&"b"));
         assert_eq!(recent.evictable(|k| *k != "b", &"d"), Some(&"c"));
         assert_eq!(recent.evictable(|k| *k == "a", &"a"), None);
+    }
+
+    #[test]
+    fn a_core_refusal_is_moved_under_its_repository_and_nothing_else_is() {
+        let failed = crate::core::error(
+            Some(&Id::Int(4)),
+            crate::core::REQUEST_FAILED,
+            "fleet-lsp: rust: server not ready after 370s; log: ~/x.log",
+        );
+        let named = name_repository(&failed, "rust", "~/r").expect("a -32803 error");
+        let text = String::from_utf8(named).unwrap();
+        assert!(
+            text.contains("fleet-lsp: rust: ~/r: server not ready after 370s; log: ~/x.log; details: fleet-lsp doctor ~/r"),
+            "{text}"
+        );
+        assert!(text.contains(r#""id":4"#), "{text}");
+        let cancelled = crate::core::error(
+            Some(&Id::Int(4)),
+            crate::core::REQUEST_CANCELLED,
+            "cancelled",
+        );
+        assert_eq!(name_repository(&cancelled, "rust", "~/r"), None);
+        assert_eq!(
+            name_repository(br#"{"id":1,"result":null}"#, "rust", "~/r"),
+            None
+        );
     }
 
     #[test]

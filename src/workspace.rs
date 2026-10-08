@@ -32,9 +32,9 @@ use std::time::{Duration, Instant};
 /// Live children per language when `FLEET_LSP_MAX_CHILDREN` is unset:
 /// rust-analyzer alone can hold over 1 GB per repository.
 pub(crate) const DEFAULT_MAX_CHILDREN: usize = 4;
-/// A root's child is started at most this often (1 + the plugin's
-/// `maxRestarts` of 2); after that its requests are refused.
-const MAX_STARTS: u32 = 3;
+/// A root whose child died this often (the first start and the plugin's
+/// `maxRestarts` of 2) is refused; an eviction is not a death.
+const MAX_DEATHS: u32 = 3;
 /// How long the client's `shutdown` waits for every child's reply.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
@@ -79,13 +79,16 @@ struct Slot {
     outbox: Vec<Vec<u8>>,
     phase: Phase,
     stdout_closed: bool,
+    stdin_broken: bool,
     log_path: String,
 }
 
 /// What is known about a project root.
+// holds-until: a pin or a server is fixed mid-session (`uv sync`); until
+// the next session the refusal stands, as a single-root session's does.
 enum RootState {
     Refused(String),
-    Resolved { res: Box<Resolution>, starts: u32 },
+    Resolved { res: Box<Resolution>, deaths: u32 },
 }
 
 /// The client's `shutdown`, waiting on the children's replies.
@@ -147,7 +150,7 @@ struct Workspace {
     // added under an already-located directory mid-session is seen by the
     // next session (the cache is per process).
     located: HashMap<PathBuf, Located>,
-    /// Project root → its latest child's log, named when its starts run out.
+    /// Project root → its latest child's log, named when it died too often.
     last_log: HashMap<PathBuf, String>,
     documents: Documents,
     recent: Recent<PathBuf>,
@@ -503,25 +506,22 @@ impl Workspace {
                 Some(text) => RootState::Refused(refusal::of_repository(lang.name(), &repo, &text)),
                 None => RootState::Resolved {
                     res: Box::new(res),
-                    starts: 0,
+                    deaths: 0,
                 },
             }
         });
         let res = match state {
             RootState::Refused(text) => return Err(text.clone()),
-            RootState::Resolved { res, starts } if *starts >= MAX_STARTS => {
+            RootState::Resolved { res, deaths } if *deaths >= MAX_DEATHS => {
                 let repo = tilde(res.git_root.as_deref().unwrap_or(root));
                 let log = self
                     .last_log
                     .get(root)
                     .cloned()
                     .unwrap_or_else(|| tilde(self.log.path()));
-                return Err(refusal::restarts_spent(lang.name(), &repo, *starts, &log));
+                return Err(refusal::restarts_spent(lang.name(), &repo, *deaths, &log));
             }
-            RootState::Resolved { res, starts } => {
-                *starts += 1;
-                (**res).clone()
-            }
+            RootState::Resolved { res, .. } => (**res).clone(),
         };
         self.make_room_for(root);
         self.start(root, &res)
@@ -532,12 +532,16 @@ impl Workspace {
         if self.serving.len() < self.settings.max_children {
             return;
         }
-        let serving = &self.serving;
-        let Some(victim) = self
-            .recent
-            .evictable(|r| serving.contains_key(r), &root.to_path_buf())
-            .cloned()
-        else {
+        // A child still starting is never evicted: what waits for its
+        // `initialize` would have nowhere to go.
+        let (serving, slots) = (&self.serving, &self.slots);
+        let live = |r: &PathBuf| {
+            serving
+                .get(r)
+                .and_then(|slot| slots.get(slot))
+                .is_some_and(|s| matches!(s.phase, Phase::Live))
+        };
+        let Some(victim) = self.recent.evictable(live, &root.to_path_buf()).cloned() else {
             return;
         };
         let Some(slot) = self.serving.remove(&victim) else {
@@ -640,6 +644,7 @@ impl Workspace {
                     waiting: Vec::new(),
                 },
                 stdout_closed: false,
+                stdin_broken: false,
                 log_path,
             },
         );
@@ -705,9 +710,14 @@ impl Workspace {
                 self.step_slot(slot, input);
             }
             SlotEvent::OwnReply(id, body) => self.own_reply(slot, &id, &body),
-            SlotEvent::StdoutClosed | SlotEvent::StdinBroken => {
+            SlotEvent::StdoutClosed => {
                 if let Some(s) = self.slots.get_mut(&slot) {
                     s.stdout_closed = true;
+                }
+            }
+            SlotEvent::StdinBroken => {
+                if let Some(s) = self.slots.get_mut(&slot) {
+                    s.stdin_broken = true;
                 }
             }
             SlotEvent::Log(line) => {
@@ -765,7 +775,7 @@ impl Workspace {
             );
             self.log.line(&text);
             self.roots.insert(root, RootState::Refused(text.clone()));
-            self.retire(slot, &text);
+            self.retire(slot, &format!("it refused initialize: {message}"));
             return;
         }
         let uris: Vec<String> = self.documents.uris().map(str::to_string).collect();
@@ -812,6 +822,11 @@ impl Workspace {
                     if let Some(id) = scan(&b).id {
                         self.client_ids.remove(&id);
                     }
+                    // A refusal from a slot's Core names its repository.
+                    let repo = self.slots.get(&slot).map(|s| s.repo.clone());
+                    let b = repo
+                        .and_then(|repo| route::name_repository(&b, self.lang(), &repo))
+                        .unwrap_or(b);
                     self.send_to_client(b);
                 }
                 Action::SetFilter(_) => {
@@ -830,7 +845,10 @@ impl Workspace {
                         "shutdown, exit and the client's end are the shell's in workspace mode"
                     )
                 }
-                Action::ChildDead => self.retire(slot, "its server died"),
+                Action::ChildDead => {
+                    self.count_death(slot);
+                    self.retire(slot, "its server died");
+                }
             }
         }
     }
@@ -838,6 +856,13 @@ impl Workspace {
     /// The slot is done: its child is killed if still there, its root
     /// forgotten until the next request starts it again.
     fn retire(&mut self, slot: u64, why: &str) {
+        // What it still held or had in flight is answered, whatever ended it.
+        let msg = format!("fleet-lsp: {}: the server was stopped ({why})", self.lang());
+        let failed = match self.slots.get_mut(&slot) {
+            Some(s) => s.core.fail_all(&msg),
+            None => return,
+        };
+        self.apply(slot, failed);
         let Some(mut s) = self.slots.remove(&slot) else {
             return;
         };
@@ -858,6 +883,15 @@ impl Workspace {
         self.answer_shutdown_when_done(Instant::now());
     }
 
+    /// A child died: one more against its root's budget.
+    fn count_death(&mut self, slot: u64) {
+        let root = self.slots.get(&slot).map(|s| s.root.clone());
+        if let Some(RootState::Resolved { deaths, .. }) = root.and_then(|r| self.roots.get_mut(&r))
+        {
+            *deaths += 1;
+        }
+    }
+
     // ---------------------------------------------------------------- loop
 
     fn housekeeping(&mut self) {
@@ -868,18 +902,21 @@ impl Workspace {
                 continue;
             };
             if let Phase::Closing { since } = s.phase {
+                let cap = self.settings.max_children;
                 match s.child.try_wait() {
                     Ok(Some(status)) => {
-                        let line = format!("stopped {} (slot {slot}): {status}", s.repo);
-                        self.slots.remove(&slot);
-                        self.log.line(&line);
+                        self.retire(slot, &format!("evicted at cap {cap}, {status}"))
                     }
                     Ok(None) if now.saturating_duration_since(since) < TEARDOWN => {}
-                    _ => self.retire(slot, "did not exit after shutdown; killed"),
+                    Ok(None) => self.retire(slot, "evicted, did not exit after shutdown; killed"),
+                    Err(e) => self.retire(
+                        slot,
+                        &format!("evicted, its status is unreadable: {e}; killed"),
+                    ),
                 }
                 continue;
             }
-            if s.stdout_closed {
+            if s.stdout_closed || s.stdin_broken {
                 if let Ok(Some(status)) = s.child.try_wait() {
                     self.step_slot(slot, Input::ChildExited(status.to_string()));
                     continue;
@@ -945,28 +982,33 @@ impl Workspace {
         }
         // One deadline for all children, not one each.
         let deadline = Instant::now() + TEARDOWN;
+        let mut exited = std::collections::HashSet::new();
         loop {
-            let mut running = 0;
-            for s in self.slots.values_mut() {
-                if s.stdout_closed {
+            for (slot, s) in &mut self.slots {
+                if exited.contains(slot) {
                     continue;
                 }
                 match s.child.try_wait() {
                     Ok(Some(status)) => {
-                        s.stdout_closed = true;
+                        exited.insert(*slot);
                         self.log.line(&format!("{} exited: {status}", s.repo));
                     }
-                    Ok(None) => running += 1,
-                    Err(_) => s.stdout_closed = true,
+                    Ok(None) => {}
+                    Err(e) => {
+                        exited.insert(*slot);
+                        self.log
+                            .line(&format!("{}: status unreadable: {e}; killed", s.repo));
+                        let _ = s.child.kill();
+                    }
                 }
             }
-            if running == 0 || Instant::now() >= deadline {
+            if exited.len() == self.slots.len() || Instant::now() >= deadline {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
-        for s in self.slots.values_mut() {
-            if let Ok(None) = s.child.try_wait() {
+        for (slot, s) in &mut self.slots {
+            if !exited.contains(slot) {
                 self.log.line(&format!("{} did not exit; killed", s.repo));
                 let _ = s.child.kill();
             }

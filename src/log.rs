@@ -208,6 +208,20 @@ mod tests {
         assert_eq!(rfc3339(leap), "2024-02-29T00:00:00.000Z");
     }
 
+    /// FALSIFY: drop the `is_session` filter in `newest`.
+    #[test]
+    fn newest_is_a_session_log_never_a_child_one() {
+        let dir = std::env::temp_dir().join(format!("fleet-lsp-log-{}", std::process::id()));
+        let lang = dir.join("rust");
+        fs::create_dir_all(&lang).unwrap();
+        let session = lang.join("20261009T010203Z-42.log");
+        fs::write(&session, "").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(lang.join("20261009T010203Z-42-fleet-lsp-1.log"), "").unwrap();
+        assert_eq!(newest(&dir), Some(session));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn tilde_shortens_home() {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();

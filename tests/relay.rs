@@ -1337,9 +1337,7 @@ fn workspace_two_servers_asking_with_the_same_id_are_told_apart() {
     let mut ids = Vec::new();
     for _ in 0..2 {
         let (_, req) = s
-            .recv_until(Duration::from_secs(20), |b| {
-                b.contains("workspace/configuration")
-            })
+            .recv_until(ANSWER, |b| b.contains("workspace/configuration"))
             .expect("a configuration request");
         let id = req
             .split(r#""id":""#)
@@ -1524,4 +1522,78 @@ fn workspace_doctor_names_the_repository_to_check() {
         text.contains("python") && text.contains("verified"),
         "{text}"
     );
+}
+
+/// FALSIFY: count every start, not every death, against the budget.
+#[test]
+fn workspace_evictions_never_spend_the_restart_budget() {
+    let _light = light();
+    let ws = Workspace::new("rotate");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[("FLEET_LSP_MAX_CHILDREN", "1")], "python");
+    for round in 0..4u32 {
+        let id = round * 2 + 1;
+        s.definition(id, &a.join("x.py"));
+        assert!(answered_by(&s.answer(id, ANSWER), &a), "round {round}");
+        s.definition(id + 1, &b.join("x.py"));
+        assert!(answered_by(&s.answer(id + 1, ANSWER), &b), "round {round}");
+    }
+    assert_eq!(count_kind(&a, "root"), 4);
+}
+
+/// FALSIFY: map `ChildScope::Slot` to `finish(1)` in `Core::end_child`.
+#[test]
+fn workspace_a_server_killed_mid_request_fails_only_its_own_requests() {
+    let _light = light();
+    let ws = Workspace::new("kill");
+    let a = ws.python("a", &[("FAKE_NEVER_READY", "1")]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(wait_for_event(
+        &a,
+        "recv initialized",
+        Duration::from_secs(20)
+    ));
+    let pid = pids(&a.join("events.log"))[0];
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+    let died = s.answer(1, ANSWER);
+    assert!(died.contains("the server exited"), "{died}");
+    assert!(
+        died.contains(&format!("details: fleet-lsp doctor {}", a.display())),
+        "{died}"
+    );
+    s.definition(2, &b.join("x.py"));
+    assert!(answered_by(&s.answer(2, ANSWER), &b));
+    assert_eq!(s.proc.try_wait().unwrap(), None, "the session goes on");
+}
+
+#[test]
+fn workspace_a_readiness_refusal_names_its_repository() {
+    let _light = light();
+    let ws = Workspace::new("ceiling");
+    let a = ws.python("a", &[("FAKE_NEVER_READY", "1")]);
+    let mut s = ws.start(&[("FLEET_LSP_CEILING_MS", "1500")], "python");
+    s.definition(1, &a.join("x.py"));
+    let late = s.answer(1, ANSWER);
+    assert!(
+        late.contains(&format!("fleet-lsp: python: {}: ", a.display())),
+        "{late}"
+    );
+    assert!(late.contains("server not ready after 1s"), "{late}");
+    assert!(late.contains("details: fleet-lsp doctor"), "{late}");
+}
+
+fn wait_for_event(repo: &Path, needle: &str, d: Duration) -> bool {
+    let deadline = Instant::now() + d;
+    while Instant::now() < deadline {
+        if events(repo).iter().any(|l| l.contains(needle)) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
 }

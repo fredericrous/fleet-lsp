@@ -258,6 +258,15 @@ impl Core {
         self.filter = filter;
     }
 
+    /// Workspace mode, when the shell ends a slot itself (an eviction that
+    /// stopped, a refused `initialize`): every request still held or in
+    /// flight is failed with `msg`. A slot whose child died has none left.
+    pub(crate) fn fail_all(&mut self, msg: &str) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.fail_everything(msg, &mut out);
+        out
+    }
+
     /// Workspace mode, before the shell's own `shutdown` reaches the child:
     /// held notifications are returned for the child, held requests failed.
     pub(crate) fn drain_for_shutdown(&mut self) -> Vec<Action> {
