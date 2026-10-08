@@ -60,6 +60,9 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   `fleet-lsp: python: stale venv: pyright 1.1.414, pinned 1.1.411; fix: uv sync`.
 - **rust-analyzer that could not load the workspace** answers
   `rust-analyzer: workspace did not load: …` with a fix.
+- **At session start**, a five-line note
+  ([hooks/code-intelligence.sh](plugins/fleet-lsp/hooks/code-intelligence.sh))
+  tells the agent to navigate with the LSP tool and keep Grep for text.
 
 ## Limits
 
