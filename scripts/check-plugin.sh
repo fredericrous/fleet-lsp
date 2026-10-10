@@ -22,6 +22,14 @@ h=plugins/fleet-lsp/hooks/code-intelligence.sh
 grep -q 'hooks/code-intelligence.sh' plugins/fleet-lsp/hooks/hooks.json || { echo "hooks.json does not run $h" >&2; fail=1; }
 stub=$(mktemp -d) && printf '#!/bin/sh\n' >"$stub/fleet-lsp" && chmod +x "$stub/fleet-lsp"
 l=$(PATH="$stub:$PATH" "$h" | wc -l | tr -d ' ')
+# Subagents get the same index, as the one-line JSON SubagentStart reads.
+grep -q 'hooks/code-intelligence.sh\\" subagent' plugins/fleet-lsp/hooks/hooks.json || { echo "hooks.json does not run $h subagent" >&2; fail=1; }
+j=$(PATH="$stub:$PATH" "$h" subagent)
+case "$j" in
+'{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"Code intelligence'*'"}}') ;;
+*) echo "$h subagent does not print SubagentStart context" >&2; fail=1 ;;
+esac
+[ "$(printf '%s\n' "$j" | wc -l | tr -d ' ')" = 1 ] || { echo "$h subagent prints more than one line" >&2; fail=1; }
 rm -r "$stub"
 [ "$l" -ge 1 ] || { echo "$h prints nothing with fleet-lsp on PATH" >&2; fail=1; }
 [ "$l" -le 6 ] || { echo "$h prints $l lines, want at most 6" >&2; fail=1; }

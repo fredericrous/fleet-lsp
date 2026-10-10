@@ -62,7 +62,9 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   `rust-analyzer: workspace did not load: …` with a fix.
 - **At session start**, a five-line note
   ([hooks/code-intelligence.sh](plugins/fleet-lsp/hooks/code-intelligence.sh))
-  tells the agent to navigate with the LSP tool and keep Grep for text.
+  tells the agent to navigate with the LSP tool, read only the range it
+  points to, and keep Grep for text. Every subagent (Explore, Plan,
+  reviewers, relais workers) gets the same note when it starts.
 
 ## Limits
 
