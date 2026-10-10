@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Subagents get the session-start note too, through `SubagentStart`:
+  `SessionStart` reaches the main conversation only. Measured over
+  2026-10-01..10, subagents made 0 LSP calls against 2,030 Reads of code
+  files and over 5,000 shell greps.
+- The note names shell `grep`/`rg`/`cat` and whole-file Reads as what LSP
+  replaces, and says to Read only the range LSP points to: main
+  conversations with the note made 6 LSP calls against 352 Reads and
+  3,492 shell greps.
+
 ## v0.5.1
 
 - The Homebrew formula's test reads `fleet-lsp doctor`'s refusal from
