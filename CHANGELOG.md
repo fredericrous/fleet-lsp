@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.2
 
 - Subagents get the session-start note too, through `SubagentStart`:
   `SessionStart` reaches the main conversation only. Measured over
@@ -10,6 +10,9 @@
   replaces, and says to Read only the range LSP points to: main
   conversations with the note made 6 LSP calls against 352 Reads and
   3,492 shell greps.
+- The plugin requires fleet-lsp 0.5.2 (the binary is unchanged otherwise).
+  Rolling back to 0.5.1: point the marketplace at `ref: v0.5.1`, update the
+  plugin, put the 0.5.1 binary first on PATH.
 
 ## v0.5.1
 
