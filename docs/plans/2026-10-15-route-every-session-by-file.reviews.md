@@ -1,0 +1,8 @@
+# Full reviews: fleet-lsp routes every session by file
+
+- **backend** (round 1, approve-with-changes, 41k, 77 s): rollback env had no mechanism (high, applied); didOpen recency can cold-start/evict (applied); memory arithmetic + hw.memsize threshold (applied); observable Verification rows (applied); pre-release baseline (applied).
+- **lang:rust** (approve-with-changes, 39k, 61 s): pin single-root tests in `Session::start_args` (high); `env_remove("FLEET_LSP_MODE")` in `start_in` (high); failed warm start still answers initialize; directory variant of `root_of`; store init before pre-start; seed test — all applied.
+- **tui** (approve-with-changes, 19k, 19 s): header text (applied); malformed-value note (dup of unix#3); eviction/cold-start log (folded into Behaviour 4); note length (rejected: prompt text); README export line (applied).
+- **unix** (approve-with-changes, 28k, 39 s): workspace teardown twins (high, applied); rollback mechanism (dup of backend#1); valid FLEET_LSP_MODE values (applied).
+- **backend** (round 2, approve-with-changes, 54k, 39 s): #1,2,3,5 resolved; carried into implementation: (4) merge the two `make check` rows and count eight new tests; (6) live check that the single-mode header has no `workspace mode` and its expected text; (7) `didOpen` records its reason so `:318` logs "most recently opened"; (8) single-root tests are lines 361-977.
+- **backend** (round 2 rerun on the final body, approve-with-changes, 24k, 23 s): nothing high; carried: count every new test in Verification; turn Rollback's "verified live" into a pre-release check (header has no `workspace mode` when single); line range 361-977; (new) the warm start must not delay the `initialize` reply beyond today's single-root behaviour.
