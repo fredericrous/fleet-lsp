@@ -149,6 +149,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         tsserver_path: res.as_ref().and_then(|r| r.tsserver_path.clone()),
         guard_pyright_log_level: lang == Lang::Python,
         scope: ChildScope::Session,
+        project_root: res.as_ref().and_then(|r| r.project_root.clone()),
     };
     Shell::new(cfg, child, client, log).run(first)
 }
