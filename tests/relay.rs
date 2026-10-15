@@ -1613,7 +1613,7 @@ impl Workspace {
         s
     }
 
-    /// The text of the session log of `lang`, once it holds `needle`.
+    /// Whether the session log of `lang` holds `needle` within `d`.
     fn log_has(&self, root: &Path, lang: &str, needle: &str, d: Duration) -> bool {
         let deadline = Instant::now() + d;
         while Instant::now() < deadline {
@@ -1786,6 +1786,50 @@ fn workspace_a_client_that_stops_reading_is_torn_down_after_30s() {
     let t0 = Instant::now();
     assert_eq!(s.wait_exit(Duration::from_secs(50)), Some(1));
     let took = t0.elapsed();
-    assert!(took <= Duration::from_secs(45), "{took:?}");
+    assert!(
+        took >= Duration::from_secs(29) && took <= Duration::from_secs(45),
+        "{took:?}"
+    );
     all_gone(&repos, Duration::from_secs(1));
+}
+
+#[test]
+fn a_session_root_with_two_projects_logs_the_several_projects_refusal() {
+    let _light = light();
+    let ws = Workspace::new("several");
+    let top = ws.dir.join("top");
+    fs::create_dir_all(top.join(".git")).unwrap();
+    for name in ["p", "q"] {
+        let p = top.join(name);
+        fs::create_dir_all(p.join("src")).unwrap();
+        fs::write(
+            p.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+    }
+    let _s = ws.start_at(&top, &[], "rust");
+    assert!(ws.log_has(&top, "rust", "several rust projects in", ANSWER));
+}
+
+#[test]
+fn workspace_symbol_ignores_a_didopen_in_a_refused_repository() {
+    let _light = light();
+    let ws = Workspace::new("open-refused");
+    let a = ws.python("a", &[]);
+    let c = ws.dir.join("c");
+    python_repo(&c, false);
+    fs::write(c.join("x.py"), "x = 1\n").unwrap();
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    s.definition(2, &c.join("x.py"));
+    let refused = s.answer(2, ANSWER);
+    assert!(
+        refused.contains(&format!("fleet-lsp: python: {}: ", c.display())),
+        "{refused}"
+    );
+    s.open(&c.join("x.py"), "python");
+    s.symbol(3);
+    assert!(answered_by(&s.answer(3, ANSWER), &a));
 }

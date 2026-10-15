@@ -318,8 +318,13 @@ impl Workspace {
     /// failure is logged; the cached refusal answers later requests.
     fn warm_start(&mut self) {
         let dir = self.settings.session_root.clone();
-        let Ok(root) = self.root_of_dir(&dir) else {
-            return;
+        let root = match self.root_of_dir(&dir) {
+            Ok(root) => root,
+            Err(text) => {
+                self.log
+                    .line(&format!("warm start of {} failed: {text}", tilde(&dir)));
+                return;
+            }
         };
         match self.slot_for(&root) {
             Ok(_) => {
@@ -383,7 +388,9 @@ impl Workspace {
             return;
         };
         let Ok(root) = self.root_of(&uri) else { return };
-        if method == "textDocument/didOpen" {
+        // A root that is refused or out of restarts cannot answer a
+        // `workspace/symbol`, so opening in it leaves `recent` where it was.
+        if method == "textDocument/didOpen" && !self.root_is_closed(&root) {
             self.recent.touch(&root);
             self.recent_reason = "most recently opened";
         }
@@ -531,6 +538,15 @@ impl Workspace {
                 Err(refusal::several(lang, &tilde(&git_root), &projects))
             }
             Located::Nothing { git_root } => Err(refusal::nothing(lang, &tilde(&git_root))),
+        }
+    }
+
+    /// Is `root` known to be refused, or out of restarts?
+    fn root_is_closed(&self, root: &Path) -> bool {
+        match self.roots.get(root) {
+            Some(RootState::Refused(_)) => true,
+            Some(RootState::Resolved { deaths, .. }) => *deaths >= MAX_DEATHS,
+            None => false,
         }
     }
 
