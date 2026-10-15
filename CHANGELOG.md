@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.3
 
 - Every session routes by file (workspace mode), also one started inside a
   repository: a worktree or another repository gets its own server instead
@@ -8,6 +8,12 @@
   project starts at `initialize`; `didOpen` makes its repository the one
   `workspaceSymbol` searches. `FLEET_LSP_MODE=single` restores one server.
   A newer plugin than the binary still gets the upgrade refusal.
+- A deleted project root (a removed worktree still open in a session) is
+  named as such, not answered with "run `cargo metadata`", and retires its
+  server. Every refused or failed answer logs `answered <method>: <kind>`.
+- The plugin requires fleet-lsp 0.5.3. Rolling back to 0.5.2: point the
+  marketplace at `ref: v0.5.2`, update the plugin, put the 0.5.2 binary first
+  on PATH, or set `FLEET_LSP_MODE=single` to keep the new binary.
 
 ## v0.5.2
 
