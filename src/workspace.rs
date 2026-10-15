@@ -618,6 +618,7 @@ impl Workspace {
             tsserver_path: res.tsserver_path.clone(),
             guard_pyright_log_level: lang == Lang::Python,
             scope: ChildScope::Slot,
+            project_root: Some(root.to_path_buf()),
         };
         let child_in = Arc::new(Queue::single(QUEUE_CAP));
         let filter = Arc::new(Mutex::new(ServerFilter::default()));

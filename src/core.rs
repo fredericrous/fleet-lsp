@@ -35,6 +35,9 @@ pub(crate) struct Config {
     pub(crate) guard_pyright_log_level: bool,
     /// What the child's death ends.
     pub(crate) scope: ChildScope,
+    /// The project the child serves; if it is deleted under a running
+    /// child, no server message can say anything useful about it.
+    pub(crate) project_root: Option<std::path::PathBuf>,
 }
 
 /// What a child's exit or hang ends.
@@ -204,7 +207,7 @@ impl Core {
                         self.forward_request(body, scan.id, out);
                     }
                 }
-                _ => self.request(body, scan.id, now, out),
+                _ => self.request(body, scan.id, method, now, out),
             },
             Kind::Notification => match method {
                 "exit" => {
@@ -275,8 +278,16 @@ impl Core {
         out
     }
 
-    fn request(&mut self, body: Vec<u8>, id: Option<Id>, now: Instant, out: &mut Vec<Action>) {
+    fn request(
+        &mut self,
+        body: Vec<u8>,
+        id: Option<Id>,
+        method: &str,
+        now: Instant,
+        out: &mut Vec<Action>,
+    ) {
         if let Some(refusal) = &self.cfg.refusal {
+            out.push(Action::Log(format!("answered {method}: refused")));
             out.push(Action::ToClient(error(
                 id.as_ref(),
                 REQUEST_FAILED,
@@ -284,8 +295,24 @@ impl Core {
             )));
             return;
         }
+        if let Some(root) = self.cfg.project_root.as_ref().filter(|r| !r.exists()) {
+            let msg = format!(
+                "fleet-lsp: {}: the project root {} no longer exists; \
+                 fix: none — use Grep and Read, or start from a live checkout",
+                self.cfg.lang,
+                root.display()
+            );
+            out.push(Action::Log(format!("answered {method}: project root gone")));
+            out.push(Action::ToClient(error(id.as_ref(), REQUEST_FAILED, &msg)));
+            self.fail_everything(&msg, out);
+            if self.cfg.scope == ChildScope::Slot {
+                self.end_child(out);
+            }
+            return;
+        }
         match self.gate.state().clone() {
             State::Failed(msg) => {
+                out.push(Action::Log(format!("answered {method}: gate failed")));
                 out.push(Action::ToClient(error(id.as_ref(), REQUEST_FAILED, &msg)))
             }
             State::Open if self.held.is_empty() => self.forward_request(body, id, out),
@@ -739,6 +766,7 @@ mod tests {
             tsserver_path: None,
             guard_pyright_log_level: false,
             scope: ChildScope::Session,
+            project_root: None,
         }
     }
 
@@ -978,6 +1006,30 @@ mod tests {
         .step(Input::ChildHung, t);
         assert!(hung.contains(&Action::ChildDead));
         assert!(!hung.iter().any(|a| matches!(a, Action::Exit(_))));
+    }
+
+    /// FALSIFY: drop the `project_root` check in `request`.
+    #[test]
+    fn a_deleted_project_root_is_named_and_retires_a_slot() {
+        let gone = std::path::PathBuf::from("/nonexistent/fleet-lsp-test-root");
+        let t = Instant::now();
+        let mut cf = cfg(Barrier::RustAnalyzer);
+        cf.project_root = Some(gone);
+        let out = Core::new(cf.clone()).step(client(REQ1), t);
+        let all = texts(&out).join("\n");
+        assert!(all.contains("no longer exists"), "{all}");
+        assert!(!all.contains("cargo metadata"), "{all}");
+        assert!(out.contains(&Action::Log(
+            "answered textDocument/references: project root gone".into()
+        )));
+        assert!(!out.contains(&Action::ChildDead));
+        cf.scope = ChildScope::Slot;
+        let out = Core::new(cf).step(client(REQ1), t);
+        assert!(out.contains(&Action::ChildDead));
+        let mut live = cfg(Barrier::None);
+        live.project_root = Some(std::env::temp_dir());
+        let out = Core::new(live).step(client(REQ1), t);
+        assert!(!texts(&out).join("").contains("no longer exists"));
     }
 
     #[test]
