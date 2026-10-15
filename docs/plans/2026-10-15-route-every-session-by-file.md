@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/route-every-session-by-file
 repos: [fleet-lsp]
 adrs: []
@@ -9,7 +9,7 @@ adrs: []
 
 ## Review panel
 👉 **Decide:** approve to reverse the 2026-10-08 non-goal "no change for a session inside a repository": route every session by file.
-📍 fleet-lsp · planned, not started · next: worktree + the test-env switch in `Session::start_args`. Panel: backend, lang:rust, tui, unix (sonnet-5-5).
+📍 fleet-lsp · implemented and verified live · next: release (person's call), then the 10-18 journal check. Panel: backend, lang:rust, tui, unix (sonnet-5-5).
 **Changed by review:** single-root tests pinned via `start_args` + `env_remove`; rollback is an exported env var; workspace teardown twins and warm-start refusal tests.
 📄 Full reviews: [2026-10-15-route-every-session-by-file.reviews.md](2026-10-15-route-every-session-by-file.reviews.md)
 **Verdicts:** 4 approve-with-changes (round 1), backend approve-with-changes (round 2); 5 findings carried into implementation.
@@ -157,5 +157,33 @@ death budget. It is simply not used when the session root is in a repo.
 
 `FLEET_LSP_MODE=single` exported in the environment Claude Code is launched from (plugin.json has no `env` key; its servers inherit Claude Code's environment), which restores today's behaviour without a reinstall. The README mode section gives the exact `export` line. Verified live: with it set, the session header says single-root. Or a marketplace `ref` to the previous tag plus
 that binary first on PATH.
+
+## Observed (2026-10-15, before push)
+
+| check | input | expected | actual |
+| --- | --- | --- | --- |
+| make check | relais runs run-65ddfd20d22e7-48b6, run-65de00792c8cc-11f28; each commit's gate | green | green (25 checks at every commit) |
+| falsify mode | `!single && !in_repo` in `relay::serve` | `a_session_inside_a_repository_serves_a_worktree_of_it` fails | FAIL at tests/relay.rs:1649 `answered_by(…, &wt)` |
+| falsify warm start | drop `self.warm_start()` | `the_session_repository_starts_at_initialize` fails | FAIL at tests/relay.rs:1662 |
+| falsify didOpen touch | drop `recent.touch` on didOpen | `workspace_symbol_follows_the_last_opened_file` fails | FAIL at tests/relay.rs:1683 `answered_by(…, &b)` |
+| restored | the three tests | pass | pass |
+| live, launched in ~/Developer/Perso, first `cd relais` | documentSymbol on relais and relais-wt-resource-admission | one child each | header `workspace mode (default; FLEET_LSP_MODE=single restores one server)`, `first project ~/Developer/Perso/relais`, slot 1 relais, slot 2 the worktree, both answered |
+| live, discriminating | findReferences relais-wt-resource-admission procs.rs:30 | non-empty by default, empty with `FLEET_LSP_MODE=single` | 17 references vs "No references found" |
+| live, launched inside fleet-lsp | findReferences on this worktree's `warm_start` | own child, non-empty | slot 2 `fleet-lsp-wt-route-by-file`, 2 references |
+| rollback header | `FLEET_LSP_MODE=single` exported | no `workspace mode` | `serve rust: session root ~/Developer/Perso/relais; git root …; project root …` |
+| memory | summed rust-analyzer RSS, all sessions, sampled every 3 s | under half of 32 GiB | peak 2.8 GiB; children 350–650 MiB; cap stays 4 |
+| baseline | `unlinked-file`/empty answers 10-08..10-15 | a count | not measurable: the journal records `lsp`/`lsp-error`, not empty answers; baseline is the session table in Context (58/1 rust single/workspace) |
+
+Not done here: the 10-18 post-release journal check (needs a release, the person's call).
+
+## Decision log
+
+- 2026-10-15: `relais.toml` lands on this branch: relais onboarding committed it when this plan's implementation was routed through relais (one check, `make check`).
+- 2026-10-15: a `didOpen` in a refused or restart-exhausted root leaves `recent` unchanged (`root_is_closed`), so a URI-less `workspace/symbol` keeps going to a serving repository; tested by `workspace_symbol_ignores_a_didopen_in_a_refused_repository`.
+- 2026-10-15: `mode_from_env` returns a `bool`, like its sibling `*_from_env` helpers — deliberate (two reviews noted it as low).
+
+## Implementation review
+
+approve-with-changes, round 1 (37k tokens, 22 s). Fixed: falsification FAIL output, live RSS and the fleet-lsp-launched worktree run recorded above; `relais.toml` and the refused-root refinement put in the Decision log. Deliberate: `mode_from_env` bool. No code changed after the review.
 
 <!-- panel: repos=fleet-lsp reviewers=backend,lang:rust,tui,unix body-sha=b4853f08f5f9 -->
