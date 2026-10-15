@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Every session routes by file (workspace mode), also one started inside a
+  repository: a worktree or another repository gets its own server instead
+  of `unlinked-file` answers from the session's first one. The session's
+  project starts at `initialize`; `didOpen` makes its repository the one
+  `workspaceSymbol` searches. `FLEET_LSP_MODE=single` restores one server.
+  A newer plugin than the binary still gets the upgrade refusal.
+
 ## v0.5.2
 
 - Subagents get the session-start note too, through `SubagentStart`:

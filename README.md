@@ -69,15 +69,18 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
 ## Limits
 
 - Claude Code starts one server per language per session, where the
-  session started. Started in a repository, that server is the
-  repository's. Started above several (`~/Developer`), fleet-lsp is in
-  *workspace mode*: each request goes to the server of the project its
-  file belongs to, started on that project's first request, at most
+  session started. fleet-lsp always runs *workspace mode*, inside a
+  repository or above several (`~/Developer`): each request goes to the
+  server of the project its file belongs to (worktrees included), at most
   `FLEET_LSP_MAX_CHILDREN` (default 4) per language, the least recently
   used shut down first. A project whose server exits three times is
   refused for the rest of the session, naming its log.
-- In workspace mode, `workspaceSymbol` (which names no file) searches the
-  repository of the file used most recently, and `references` stay inside
+  The session's own project starts at `initialize`. To get one server for
+  the whole session back, launch Claude Code with
+  `export FLEET_LSP_MODE=single` (the session log header then has no
+  `workspace mode`).
+- `workspaceSymbol` (which names no file) searches the repository of the
+  file opened or used most recently, and `references` stay inside
   one repository: answers are never merged across servers.
 - `fleet-lsp doctor` checks one repository: from above several, name it
   (`fleet-lsp doctor relais`); without one it exits 1 and says so.

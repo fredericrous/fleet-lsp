@@ -225,7 +225,11 @@ impl Session {
 
     fn start_args(fx: &Fixture, env: &[(&str, &str)], read_stdout: bool, args: &[&str]) -> Session {
         let events = fx.events();
-        let mut all = vec![("FAKE_EVENTS", events.to_str().unwrap())];
+        // Every test through here predates workspace mode as the default.
+        let mut all = vec![
+            ("FAKE_EVENTS", events.to_str().unwrap()),
+            ("FLEET_LSP_MODE", "single"),
+        ];
         all.extend_from_slice(env);
         Session::start_in(&fx.dir, &all, read_stdout, args)
     }
@@ -237,6 +241,7 @@ impl Session {
             .current_dir(dir)
             .env("XDG_STATE_HOME", dir.join("state"))
             .env_remove("FAKE_EVENTS")
+            .env_remove("FLEET_LSP_MODE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -1437,7 +1442,7 @@ fn workspace_a_rust_child_is_initialized_as_a_single_root_one_is() {
     {
         let mut s = Session::start_in(
             &r,
-            &[("PATH", &path)],
+            &[("PATH", &path), ("FLEET_LSP_MODE", "single")],
             true,
             &["serve", "rust", "--min-version", "0.1.0"],
         );
@@ -1596,4 +1601,235 @@ fn wait_for_event(repo: &Path, needle: &str, d: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+// ----------------------------------------------- every session routes by file
+
+impl Workspace {
+    /// A session whose `initialize` names `root`, which may be inside a repository.
+    fn start_at(&self, root: &Path, env: &[(&str, &str)], lang: &str) -> Session {
+        let mut s = Session::start_in(root, env, true, &["serve", lang, "--min-version", "0.1.0"]);
+        s.initialize(root);
+        s
+    }
+
+    /// Whether the session log of `lang` holds `needle` within `d`.
+    fn log_has(&self, root: &Path, lang: &str, needle: &str, d: Duration) -> bool {
+        let deadline = Instant::now() + d;
+        while Instant::now() < deadline {
+            let dir = root.join("state/fleet-lsp").join(lang);
+            let found = fs::read_dir(&dir).into_iter().flatten().flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                // The session log, not a child's.
+                name.matches('-').count() == 1
+                    && fs::read_to_string(e.path()).is_ok_and(|t| t.contains(needle))
+            });
+            if found {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+}
+
+/// FALSIFY: choose single-root whenever the session root has a git root.
+#[test]
+fn a_session_inside_a_repository_serves_a_worktree_of_it() {
+    let _light = light();
+    let ws = Workspace::new("worktree");
+    let a = ws.python("a", &[]);
+    let wt = ws.python("a-wt", &[]);
+    // A linked worktree has a `.git` file, not a directory.
+    fs::remove_dir_all(wt.join(".git")).unwrap();
+    fs::write(wt.join(".git"), "gitdir: /nowhere\n").unwrap();
+    let mut s = ws.start_at(&a, &[], "python");
+    s.definition(1, &wt.join("x.py"));
+    s.definition(2, &a.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &wt));
+    assert!(answered_by(&s.answer(2, ANSWER), &a));
+}
+
+/// FALSIFY: drop the pre-start; drop the `recent` seed.
+#[test]
+fn the_session_repository_starts_at_initialize() {
+    let _light = light();
+    let ws = Workspace::new("warm");
+    let a = ws.python("a", &[]);
+    let sub = a.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let mut s = ws.start_at(&sub, &[], "python");
+    assert!(
+        wait_for_event(&a, &format!("root {}", uri(&a)), ANSWER),
+        "{:?}",
+        events(&a)
+    );
+    s.symbol(1);
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+}
+
+/// FALSIFY: drop the `didOpen` touch.
+#[test]
+fn workspace_symbol_follows_the_last_opened_file() {
+    let _light = light();
+    let ws = Workspace::new("opened");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    s.answer(1, ANSWER);
+    s.open(&b.join("x.py"), "python");
+    s.symbol(2);
+    assert!(answered_by(&s.answer(2, ANSWER), &b));
+}
+
+#[test]
+fn a_refused_session_repository_still_initializes() {
+    let _light = light();
+    let ws = Workspace::new("refused-root");
+    let c = ws.dir.join("c");
+    python_repo(&c, false);
+    fs::write(c.join("x.py"), "x = 1\n").unwrap();
+    // `initialize` is answered (start_at asserts it), the failure is logged.
+    let mut s = ws.start_at(&c, &[], "python");
+    assert!(ws.log_has(&c, "python", "warm start of", ANSWER));
+    s.definition(1, &c.join("x.py"));
+    let refused = s.answer(1, ANSWER);
+    assert!(
+        refused.contains(&format!("fleet-lsp: python: {}: ", c.display())),
+        "{refused}"
+    );
+}
+
+#[test]
+fn the_workspace_header_names_the_mode_and_the_session_root() {
+    let _light = light();
+    let ws = Workspace::new("header");
+    let a = ws.python("a", &[]);
+    let _s = ws.start_at(&a, &[], "python");
+    assert!(
+        ws.log_has(
+            &a,
+            "python",
+            "workspace mode (default; FLEET_LSP_MODE=single restores one server)",
+            ANSWER
+        ),
+        "header missing"
+    );
+    assert!(ws.log_has(&a, "python", "first project", ANSWER));
+}
+
+/// Two repositories with a held request each: two live children.
+fn two_held(ws: &Workspace, extra: &[(&str, &str)], read: bool) -> (Session, Vec<PathBuf>) {
+    let mut env = vec![("FAKE_NEVER_READY", "1")];
+    env.extend_from_slice(extra);
+    let repos = vec![ws.python("a", &env), ws.python("b", &env)];
+    let args = ["serve", "python", "--min-version", "0.1.0"];
+    let mut s = Session::start_in(&ws.dir, &[], read, &args);
+    if read {
+        s.initialize(&ws.dir);
+    } else {
+        s.send(&format!(
+            r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"rootUri":"file://{}","capabilities":{{}}}}}}"#,
+            ws.dir.display()
+        ));
+        s.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    }
+    s.definition(1, &repos[0].join("x.py"));
+    s.definition(2, &repos[1].join("x.py"));
+    for r in &repos {
+        assert!(wait_for_event(r, " pid ", ANSWER), "{:?}", events(r));
+    }
+    (s, repos)
+}
+
+fn all_gone(repos: &[PathBuf], d: Duration) {
+    for r in repos {
+        for pid in pids(&r.join("events.log")) {
+            assert!(
+                gone_within(pid, d),
+                "server {pid} of {} outlived",
+                r.display()
+            );
+        }
+    }
+}
+
+/// FALSIFY: skip the slot teardown.
+#[test]
+fn workspace_stdin_eof_while_held_tears_down_within_6s() {
+    let _light = light();
+    let ws = Workspace::new("eof");
+    let (mut s, repos) = two_held(&ws, &[], true);
+    s.stdin = None;
+    assert_eq!(s.wait_exit(Duration::from_secs(6)), Some(1));
+    all_gone(&repos, Duration::from_secs(1));
+}
+
+#[test]
+fn workspace_sigterm_while_held_leaves_no_server_behind() {
+    let _light = light();
+    let ws = Workspace::new("term");
+    let (s, repos) = two_held(&ws, &[], true);
+    Command::new("kill")
+        .args(["-TERM", &s.proc.id().to_string()])
+        .status()
+        .unwrap();
+    all_gone(&repos, Duration::from_secs(6));
+}
+
+#[test]
+fn workspace_a_client_that_stops_reading_is_torn_down_after_30s() {
+    let _heavy = heavy();
+    let ws = Workspace::new("noclient");
+    let (mut s, repos) = two_held(&ws, &[("FAKE_FLOOD_MIB", "64")], false);
+    let t0 = Instant::now();
+    assert_eq!(s.wait_exit(Duration::from_secs(50)), Some(1));
+    let took = t0.elapsed();
+    assert!(
+        took >= Duration::from_secs(29) && took <= Duration::from_secs(45),
+        "{took:?}"
+    );
+    all_gone(&repos, Duration::from_secs(1));
+}
+
+#[test]
+fn a_session_root_with_two_projects_logs_the_several_projects_refusal() {
+    let _light = light();
+    let ws = Workspace::new("several");
+    let top = ws.dir.join("top");
+    fs::create_dir_all(top.join(".git")).unwrap();
+    for name in ["p", "q"] {
+        let p = top.join(name);
+        fs::create_dir_all(p.join("src")).unwrap();
+        fs::write(
+            p.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+    }
+    let _s = ws.start_at(&top, &[], "rust");
+    assert!(ws.log_has(&top, "rust", "several rust projects in", ANSWER));
+}
+
+#[test]
+fn workspace_symbol_ignores_a_didopen_in_a_refused_repository() {
+    let _light = light();
+    let ws = Workspace::new("open-refused");
+    let a = ws.python("a", &[]);
+    let c = ws.dir.join("c");
+    python_repo(&c, false);
+    fs::write(c.join("x.py"), "x = 1\n").unwrap();
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    s.definition(2, &c.join("x.py"));
+    let refused = s.answer(2, ANSWER);
+    assert!(
+        refused.contains(&format!("fleet-lsp: python: {}: ", c.display())),
+        "{refused}"
+    );
+    s.open(&c.join("x.py"), "python");
+    s.symbol(3);
+    assert!(answered_by(&s.answer(3, ANSWER), &a));
 }
