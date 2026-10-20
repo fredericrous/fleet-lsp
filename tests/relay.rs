@@ -1833,3 +1833,110 @@ fn workspace_symbol_ignores_a_didopen_in_a_refused_repository() {
     s.symbol(3);
     assert!(answered_by(&s.answer(3, ANSWER), &a));
 }
+
+// ----------------------------------------------- a project root deleted from disk
+
+/// Whether `answer` is the refusal that a project root no longer exists,
+/// naming `root` (as given or resolved).
+fn names_gone_root(answer: &str, root: &Path, real: &Path) -> bool {
+    answer.contains("no longer exists")
+        && (answer.contains(&root.display().to_string())
+            || answer.contains(&real.display().to_string()))
+}
+
+/// The session log of `lang`, whole.
+fn session_log(ws: &Workspace, lang: &str) -> String {
+    let dir = ws.dir.join("state/fleet-lsp").join(lang);
+    fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        // The session log, not a child's.
+        .filter(|e| e.file_name().to_string_lossy().matches('-').count() == 1)
+        .filter_map(|e| fs::read_to_string(e.path()).ok())
+        .collect()
+}
+
+/// Guards the `gone_root_above` check in `Workspace::root_of`: a file in a
+/// directory that never existed is refused for the deleted root, not as
+/// "in no repository".
+#[test]
+fn workspace_a_file_under_a_deleted_root_is_refused_naming_the_root() {
+    let _light = light();
+    let ws = Workspace::new("gone-file");
+    let a = ws.python("a", &[]);
+    let real = fs::canonicalize(&a).unwrap();
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    fs::remove_dir_all(&a).unwrap();
+    s.definition(2, &a.join("sub/y.py"));
+    let refused = s.answer(2, ANSWER);
+    assert!(names_gone_root(&refused, &a, &real), "{refused}");
+    assert_eq!(s.proc.try_wait().unwrap(), None, "the session goes on");
+}
+
+/// Guards the `recent.forget` loop in `Workspace::request`: a URI-less
+/// request skips deleted roots, and refuses once none is left.
+#[test]
+fn workspace_symbol_skips_deleted_roots_and_refuses_when_none_is_left() {
+    let _light = light();
+    let ws = Workspace::new("gone-recent");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let real_a = fs::canonicalize(&a).unwrap();
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    s.answer(1, ANSWER);
+    s.definition(2, &b.join("x.py"));
+    s.answer(2, ANSWER);
+    fs::remove_dir_all(&b).unwrap();
+    s.symbol(3);
+    let next = s.answer(3, ANSWER);
+    assert!(answered_by(&next, &a), "{next}");
+    fs::remove_dir_all(&a).unwrap();
+    s.symbol(4);
+    let none = s.answer(4, ANSWER);
+    assert!(names_gone_root(&none, &a, &real_a), "{none}");
+}
+
+/// Guards the root-gone branch of `Action::ChildDead`: a child whose root
+/// vanished is retired, with no death counted and no restart. Three rounds
+/// would spend the budget of three deaths, so a fourth start proves none was.
+#[test]
+fn workspace_a_child_of_a_deleted_root_is_retired_without_a_death() {
+    let _light = light();
+    let ws = Workspace::new("gone-child");
+    let a = ws.python("a", &[]);
+    let away = ws.dir.join("a-away");
+    let marker = "its project root no longer exists";
+    let rounds = 3usize;
+    let mut s = ws.start(&[], "python");
+    for round in 0..rounds {
+        let id = (round * 2 + 1) as u32;
+        s.definition(id, &a.join("x.py"));
+        assert!(answered_by(&s.answer(id, ANSWER), &a), "round {round}");
+        let pid = *pids(&a.join("events.log")).last().unwrap();
+        // The root leaves the disk (kept aside to bring it back), then the child dies.
+        fs::rename(&a, &away).unwrap();
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        let deadline = Instant::now() + ANSWER;
+        while session_log(&ws, "python").matches(marker).count() <= round
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let log = session_log(&ws, "python");
+        assert_eq!(log.matches(marker).count(), round + 1, "{log}");
+        assert!(!log.contains("its server died"), "{log}");
+        fs::rename(&away, &a).unwrap();
+        assert_eq!(count_kind(&a, "root"), round + 1, "no restart on its own");
+    }
+    let last = (rounds * 2 + 1) as u32;
+    s.definition(last, &a.join("x.py"));
+    let ok = s.answer(last, ANSWER);
+    assert!(answered_by(&ok, &a), "{ok}");
+    assert_eq!(count_kind(&a, "root"), rounds + 1);
+}

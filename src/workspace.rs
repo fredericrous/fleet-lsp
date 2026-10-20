@@ -343,6 +343,18 @@ impl Workspace {
         let root = match msg.as_ref().and_then(route::document_uri) {
             Some(uri) => self.root_of(uri),
             None => {
+                let mut gone = None;
+                while let Some(root) = self.recent.latest().cloned() {
+                    if root.exists() {
+                        break;
+                    }
+                    self.log.line(&format!(
+                        "forgot {}: the project root no longer exists",
+                        tilde(&root)
+                    ));
+                    self.recent.forget(&root);
+                    gone = Some(root);
+                }
                 let latest = self.recent.latest().cloned();
                 if let Some(root) = &latest {
                     self.log.line(&format!(
@@ -352,7 +364,10 @@ impl Workspace {
                         self.recent_reason
                     ));
                 }
-                latest.ok_or_else(|| refusal::no_document(self.lang()))
+                latest.ok_or_else(|| match gone {
+                    Some(root) => refusal::root_gone(self.lang(), &tilde(&root)),
+                    None => refusal::no_document(self.lang()),
+                })
             }
         };
         let slot = root.and_then(|root| {
@@ -515,7 +530,23 @@ impl Workspace {
             return Err(refusal::no_repository(lang, uri));
         };
         let dir = path.parent().unwrap_or(&path).to_path_buf();
+        if let Some(root) = self.gone_root_above(&path) {
+            return Err(refusal::root_gone(lang, &tilde(&root)));
+        }
         self.root_of_dir_for(&dir, &path)
+    }
+
+    /// A known project root, no longer on disk, that holds `path`.
+    fn gone_root_above(&self, path: &Path) -> Option<PathBuf> {
+        let located = self.located.values().filter_map(|l| match l {
+            Located::Project { project_root, .. } => Some(project_root),
+            _ => None,
+        });
+        self.roots
+            .keys()
+            .chain(located)
+            .find(|r| path.starts_with(r) && !r.exists())
+            .cloned()
     }
 
     /// The project root of a directory itself (the session root).
@@ -552,6 +583,12 @@ impl Workspace {
 
     /// The slot serving `root`, started if need be.
     fn slot_for(&mut self, root: &Path) -> Result<u64, String> {
+        if !root.exists() {
+            if let Some(slot) = self.serving.get(root).copied() {
+                self.retire(slot, "its project root no longer exists");
+            }
+            return Err(refusal::root_gone(self.lang(), &tilde(root)));
+        }
         if let Some(slot) = self.serving.get(root) {
             return Ok(*slot);
         }
@@ -909,8 +946,14 @@ impl Workspace {
                     )
                 }
                 Action::ChildDead => {
-                    self.count_death(slot);
-                    self.retire(slot, "its server died");
+                    let gone = self.slots.get(&slot).is_some_and(|s| !s.root.exists());
+                    if gone {
+                        // A deleted root is not a crash: nothing to restart in.
+                        self.retire(slot, "its project root no longer exists");
+                    } else {
+                        self.count_death(slot);
+                        self.retire(slot, "its server died");
+                    }
                 }
             }
         }
