@@ -211,6 +211,11 @@ impl<K: PartialEq + Clone> Recent<K> {
         self.order.insert(0, key.clone());
     }
 
+    /// Drops `key`: a root that is gone must not be the default again.
+    pub(crate) fn forget(&mut self, key: &K) {
+        self.order.retain(|k| k != key);
+    }
+
     pub(crate) fn latest(&self) -> Option<&K> {
         self.order.first()
     }
@@ -248,6 +253,14 @@ pub(crate) fn name_repository(body: &[u8], lang: &str, repo: &str) -> Option<Vec
 pub(crate) mod refusal {
     pub(crate) fn no_repository(lang: &str, path: &str) -> String {
         format!("fleet-lsp: {lang}: {path} is in no git repository; fix: open a file inside a repository")
+    }
+
+    /// A project root deleted from disk; also what a slot's `Core` answers.
+    pub(crate) fn root_gone(lang: &str, root: &str) -> String {
+        format!(
+            "fleet-lsp: {lang}: the project root {root} no longer exists; \
+             fix: none — use Grep and Read, or start from a live checkout"
+        )
     }
 
     pub(crate) fn no_document(lang: &str) -> String {
@@ -395,6 +408,9 @@ mod tests {
         }
         recent.touch(&"a");
         assert_eq!(recent.latest(), Some(&"a"));
+        recent.forget(&"a");
+        assert_eq!(recent.latest(), Some(&"c"));
+        recent.touch(&"a");
         assert_eq!(recent.evictable(|_| true, &"d"), Some(&"b"));
         assert_eq!(recent.evictable(|k| *k != "b", &"d"), Some(&"c"));
         assert_eq!(recent.evictable(|k| *k == "a", &"a"), None);

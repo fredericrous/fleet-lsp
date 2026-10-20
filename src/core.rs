@@ -296,12 +296,7 @@ impl Core {
             return;
         }
         if let Some(root) = self.cfg.project_root.as_ref().filter(|r| !r.exists()) {
-            let msg = format!(
-                "fleet-lsp: {}: the project root {} no longer exists; \
-                 fix: none — use Grep and Read, or start from a live checkout",
-                self.cfg.lang,
-                root.display()
-            );
+            let msg = crate::route::refusal::root_gone(self.cfg.lang, &root.display().to_string());
             out.push(Action::Log(format!("answered {method}: project root gone")));
             out.push(Action::ToClient(error(id.as_ref(), REQUEST_FAILED, &msg)));
             self.fail_everything(&msg, out);
