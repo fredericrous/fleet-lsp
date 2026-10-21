@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.4
+
+- A file under a project root deleted from disk gets the `project root …
+  no longer exists` refusal naming the root, not "is in no git repository".
+  Deleted roots are dropped from the recent list, so a URI-less
+  `workspace/symbol` goes to the next live root. A server whose root was
+  deleted is retired without counting as a crash.
+- The plugin requires fleet-lsp 0.5.4. Rolling back to 0.5.3: point the
+  marketplace at `ref: v0.5.3`, update the plugin, and put the 0.5.3 binary
+  first on PATH.
+
 ## v0.5.3
 
 - Every session routes by file (workspace mode), also one started inside a
