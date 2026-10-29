@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.5
 
 - A server whose project root was deleted is stopped within about 5
   seconds, without waiting for a request.
@@ -8,9 +8,12 @@
   shut down gracefully (`shutdown` then `exit`, bounded) and started again,
   with its open documents replayed, on the next request or `didOpen` /
   `didChange`. An idle stop is not a crash.
-- A server that does not answer `initialize` within the ceiling is retired
-  and counts as one death.
+- A server that does not answer `initialize` within twice the ceiling plus
+  10 seconds is retired and counts as one death.
 - An eviction now waits for the `shutdown` reply before sending `exit`.
+- The plugin requires fleet-lsp 0.5.5. Rolling back to 0.5.4: point the
+  marketplace at `ref: v0.5.4`, update the plugin, and put the 0.5.4 binary
+  first on PATH.
 
 ## v0.5.4
 
