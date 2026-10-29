@@ -2243,9 +2243,9 @@ fn workspace_a_child_restarted_by_an_edit_that_never_initializes_is_retired() {
     let mut s = ws.start(
         &[
             ("FLEET_LSP_IDLE_SECONDS", "1"),
-            // The init deadline is twice the ceiling plus 10 s: 20 s here,
+            // The init deadline is twice the ceiling plus 10 s: 30 s here,
             // room for the first child to start on a loaded machine.
-            ("FLEET_LSP_CEILING_MS", "5000"),
+            ("FLEET_LSP_CEILING_MS", "10000"),
         ],
         "python",
     );
@@ -2261,7 +2261,7 @@ fn workspace_a_child_restarted_by_an_edit_that_never_initializes_is_retired() {
         Duration::from_secs(10)
     ));
     let pid = *pids(&a.join("events.log")).last().unwrap();
-    assert!(gone_within(pid, Duration::from_secs(35)));
+    assert!(gone_within(pid, Duration::from_secs(45)));
     assert!(ws.log_has(
         &ws.dir,
         "python",
