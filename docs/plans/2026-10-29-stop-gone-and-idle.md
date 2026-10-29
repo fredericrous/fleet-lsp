@@ -64,4 +64,28 @@ Intended outcome: a child whose root is gone is stopped within a few seconds wit
 - **Gates:** `make check` (fmt, clippy `-D warnings`, tests, `scripts/check-no-deps.sh`) and CI green.
 - **Live, after `brew upgrade`:** in a fresh session, query a throwaway worktree, delete it, and confirm with `ps`/`lsof` that its rust-analyzer is gone within 10 s and `worktree-sweep --lsp` finds nothing.
 
+## Verification record (2026-10-29, before the push)
+
+Input → expected → actual. Each new integration test was run alone (`cargo test --test relay -- --exact <name>`), at load 16–63:
+
+- `sweep` unit tests (gone root, 29/30 min, Starting and busy never idle, idle 0, `None` never gone, client shutdown) → pass → pass, in the 133 unit tests.
+- Gone root, deleted and restored 3 times (`MAX_DEATHS`) → child gone within 10 s each time, `retired … its project root no longer exists`, `root_gone` refusal, 4th request answered → pass (19 s).
+- Idle stop and restart on a request → `shutdown` then `exit`, second child gets the replayed `didOpen` → pass (6 s); 3 idle cycles then a 4th request → pass (7 s).
+- Edit after idle stop → one `didOpen` carrying the edit, no `didChange` → pass (5 s); `didClose` on root B starts no child → pass (9 s).
+- Handshake: delayed reply → no `exit`/EOF before it → pass (5 s); missing reply → forced stop, no death → pass (12 s); ignored `exit` → forced stop, no death → pass (12 s).
+- Init deadline: first start that never initializes → request refused `not ready`, retired at the deadline, one answer per request → pass (29 s); same after a request-triggered idle restart → pass (33 s); after a `didChange`-triggered one → pass (24 s).
+- Overlapping generations → older slot's late retirement keeps the newer idle marker → pass (6 s).
+- `make check` → green → green: 133 unit and 59 integration tests, fmt, clippy `-D warnings`, `check-no-deps`, MSRV (load 15 → 63).
+- Live check after `brew upgrade`: runs after the release, not before this push.
+
+## Decision log
+
+- 2026-10-29: the relais run was interrupted at its wall time with the work complete. Its candidate was committed as 353f018. The repair run was blocked (`workspace_has_interrupted_run`), and `relais resume --retire` would have removed this worktree. The person chose to commit the candidate and finish by hand.
+- 2026-10-29: Design 5 said the init deadline is "based on `settings.ceiling`". It is now `2 × ceiling + 10 s` (2772119). At exactly the ceiling it pre-empted a request's own readiness refusal: `workspace_a_readiness_refusal_names_its_repository` failed with `initialization timed out` under load, and a merely slow first start was counted as a death.
+- 2026-10-29: under load 50–235 (other sessions' test runs, and XprotectService scanning each fresh fake script) the integration tests time out at a first start. The pre-change commit 294867e fails the same way, so the load is the cause. The suite was judged at low load.
+
+## Implementation review
+
+Round 1 approve-with-changes: a swallowed `slot_for` refusal (blocking) was fixed by logging it. The gone-root test now loops `MAX_DEATHS` times, a request-triggered init-deadline test was added, and the idle setting is parsed purely (fixed in dace6a0). The unrecorded verification (high) is now recorded above. Delta approve-with-changes: 4 of 5 resolved, and the 5th was settled by the record above. 66k + 72k tokens, 77 s + 24 s.
+
 <!-- panel: repos=fleet-lsp reviewers=backend,lang:rust,codex body-sha=3ae75be02d75 -->
