@@ -1179,7 +1179,8 @@ impl Workspace {
         }
     }
 
-    /// Stops the children whose root left the disk and those left idle: the
+    /// Refreshes `last_used` on a slot that holds or forwards a request, then
+    /// stops the children whose root left the disk and those left idle: the
     /// facts are gathered here, the decision is `sweep`'s.
     fn sweep_slots(&mut self, now: Instant) {
         if !may_sweep(self.shutdown.is_some(), self.shutdown_seen) {
@@ -1192,8 +1193,14 @@ impl Workspace {
         let mut notes = Vec::new();
         let views: Vec<SlotView> = self
             .slots
-            .iter()
+            .iter_mut()
             .map(|(id, s)| {
+                let quiet = s.core.is_quiet();
+                if !quiet {
+                    // A request held or in flight is use: idle time runs from
+                    // the moment the slot went quiet.
+                    s.last_used = now;
+                }
                 let served = self.serving.get(&s.root) == Some(id);
                 let root_exists = if check && served {
                     match s.root.try_exists() {
@@ -1218,7 +1225,7 @@ impl Workspace {
                         Phase::Live => PhaseView::Live,
                         Phase::Closing { .. } => PhaseView::Closing,
                     },
-                    quiet: s.core.is_quiet(),
+                    quiet,
                 }
             })
             .collect();

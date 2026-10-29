@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/stop-gone-and-idle
 repos: [fleet-lsp]
 adrs: []
@@ -10,7 +10,7 @@ adrs: []
 
 📄 Full reviews: [2026-10-29-stop-gone-and-idle.reviews.md](2026-10-29-stop-gone-and-idle.reviews.md)
 👉 **Decide:** none. Approve if stopping a server ~5 s after its root is deleted, and gracefully after 30 min idle (restarted on the next request or edit), is the fix you want, released as fleet-lsp 0.5.5.
-📍 fleet-lsp · reviewed, nothing built · next: worktree from origin/main, land this plan, then one relais run. Panel: backend (opus-5-5), lang:rust (opus-5-5), codex (gpt).
+📍 fleet-lsp · shipped in v0.5.5 (#22, #23), live-checked · next: none. Panel: backend (opus-5-5), lang:rust (opus-5-5), codex (gpt).
 **Changed by review:** an idle-stopped root restarts on `didOpen`/`didChange` (not `didClose`), its marker survives the old child's reap; a real shutdown handshake (`exit` after the `shutdown` reply, stdin kept open until then, bounded); `Starting` gets an init deadline; `try_exists` keeps a server on a stat error.
 **Verdicts:** backend approve-with-changes twice then approve; lang:rust approve-with-changes; codex approve-with-changes (3 high, applied). 4 carried into implementation: the `didClose` check runs on a separate root B; README notes that an init timeout counts toward `MAX_DEATHS`, never reset; the relais contract builds from Design (the full `Phase::Closing { why, shutdown_id, stage, deadline }`, `idle_stopped`, init deadline, stdin rule, fake server's delayed/omitted reply), not the shorter Changes list; and its acceptance adds the handshake, missing-reply, init-deadline and overlapping-generation tests.
 
@@ -76,7 +76,9 @@ Input → expected → actual. Each new integration test was run alone (`cargo t
 - Init deadline: first start that never initializes → request refused `not ready`, retired at the deadline, one answer per request → pass (29 s); same after a request-triggered idle restart → pass (33 s); after a `didChange`-triggered one → pass (49 s, load 14, after fb76e3d raised its ceiling to 10 s).
 - Overlapping generations → older slot's late retirement keeps the newer idle marker → pass (6 s).
 - `make check` → green → green: 133 unit and 59 integration tests, fmt, clippy `-D warnings`, `check-no-deps`, MSRV (load 15 → 63).
-- Live check after `brew upgrade`: runs after the release, not before this push.
+- Live check after `brew upgrade` to 0.5.5: a session started with `fleet-lsp serve rust` from `~/Developer/Perso` hovered over `src/main.rs` in a throwaway worktree of fleet-lsp, which started a rust-analyzer rooted there (pid 17250). `git worktree remove` then deleted the worktree. Expected: the server gone within 10 s with no further request. Actual: gone 4.6 s after the removal, and fleet-lsp kept running. `worktree-sweep --lsp` then found one orphan, whose `fleet-lsp serve` had started at 10:50, before the upgrade, with the old binary. The sweep stopped it, so nothing is left.
+- Follow-up for 0.5.6, `a_client_that_stops_reading_is_torn_down_after_30s`: the test timed the 30 s client stall from `initialize` (3e3631f). Input: a 20 s delay before the fake's flood. Expected: the old timing fails and the new anchor passes. Actual: the old timing gave `left: None` after 50 s; anchored at the fake's new `flooding` event, it passed (32.2 s), and passed again in a full run at load 166.
+- Follow-up for 0.5.6, idle while held (c9a53b9): `workspace_a_request_held_for_the_ceiling_is_not_idle_stopped`. Input: `FLEET_LSP_IDLE_SECONDS=1`, ceiling 3 s, fake ready after 4 s. Expected: the first ask is refused `not ready`, and the same child answers the next ask with one start. Actual: fails `never answered` on the pre-fix `workspace.rs` (rebuilt) and passes with the fix.
 
 ## Decision log
 
@@ -86,8 +88,12 @@ Input → expected → actual. Each new integration test was run alone (`cargo t
 - 2026-10-29: the push rehearsal at load 52 failed `a_client_that_stops_reading_is_torn_down_after_30s` (unchanged code). It also failed the same way on 294867e. The same rehearsal failed the edit-triggered init test at its first start (5 s ceiling), so fb76e3d gives that test a 10 s ceiling, like its request-triggered twin.
 - 2026-10-29: the person approved skipping the pre-push `cargo-test` once, on the green `make check` above. On PR #22, CI ran the full suite green on macOS and Ubuntu. The ADR check failed because the refreshed pack has a `governs` rule field that the pinned aval 1.9.0 cannot parse. e06cfc8 bumps the pin to 1.11.0 and reinstalls the session hook, and `aval check`, `traits --check` and `hook install --check` pass locally.
 
+- 2026-10-29 (0.5.6): Design 3 is amended. A request held or in flight counts as use: while a slot's core is not quiet, `last_used` is refreshed on each housekeeping pass, so idle time runs from when the slot goes quiet. Before this, a request held for the whole idle window left the slot stopped about 15 ms after it was answered or refused. When `FLEET_LSP_IDLE_SECONDS` was shorter than the ceiling, a slow start restarted forever (the session log showed "not ready after 10s", then "retired … idle for 1s", over and over). The person chose to fix it and release 0.5.6.
+
 ## Implementation review
 
 Round 1 approve-with-changes: a swallowed `slot_for` refusal (blocking) was fixed by logging it. The gone-root test now loops `MAX_DEATHS` times, a request-triggered init-deadline test was added, and the idle setting is parsed purely (fixed in dace6a0). The unrecorded verification (high) is now recorded above. Delta approve-with-changes: 4 of 5 resolved, and the 5th was settled by the record above. Second delta (fb76e3d, test ceiling): approve-with-changes, one low finding on this record, fixed here. Third delta (e06cfc8, aval pin): approve. 66k + 72k + 77k + 81k tokens, 77 s + 24 s + 20 s + 15 s.
+
+0.5.6 follow-up (branch test/stops-reading-anchor): round 1 approve-with-changes. The medium finding (Design 3 amendment unrecorded) is recorded above; the low finding (sweep_slots doc comment) is fixed in 4bf5613. Delta approve. 44k + 46k tokens, 64 s + 13 s.
 
 <!-- panel: repos=fleet-lsp reviewers=backend,lang:rust,codex body-sha=3ae75be02d75 -->

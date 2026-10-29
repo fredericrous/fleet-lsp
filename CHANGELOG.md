@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A request held or in flight counts as use, so a slot is no longer
+  idle-stopped the moment a long-held request is answered (affected only
+  `FLEET_LSP_IDLE_SECONDS` shorter than the ceiling).
+
 ## v0.5.5
 
 - A server whose project root was deleted is stopped within about 5

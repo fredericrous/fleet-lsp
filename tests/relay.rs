@@ -644,6 +644,10 @@ fn a_client_that_stops_reading_is_torn_down_after_30s() {
         fx.dir.display()
     ));
     s.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    // The 30 s count starts when the flood fills the client's pipe, not at
+    // `initialize`: start the clock there, so a slow start on a loaded
+    // machine (resolving the project, spawning the fake) is not counted.
+    assert!(wait_for(&fx, "flooding", Duration::from_secs(60)));
     let t0 = Instant::now();
     let code = s.wait_exit(Duration::from_secs(50));
     assert_eq!(code, Some(1));
@@ -1980,11 +1984,58 @@ fn first_index(repo: &Path, kind: &str) -> Option<usize> {
 
 /// Opens `file` and asks one question, so a child is up and the document is
 /// in the store. The caller's `id` is the question's.
+///
+/// A slow first start on a loaded machine is refused with `server not ready`
+/// while the child keeps starting, so that refusal is retried up to 5 times
+/// with distinct ids (9000 + id * 10 + retry) before the answer is asserted.
 fn open_and_ask(s: &mut Session, file: &Path, id: u32) {
     s.open(file, "python");
     s.definition(id, file);
-    let answer = s.answer(id, ANSWER);
+    let mut answer = s.answer(id, ANSWER);
+    for retry in 1..=5u32 {
+        if !answer.contains("server not ready") {
+            break;
+        }
+        let retry_id = 9000 + id * 10 + retry;
+        s.definition(retry_id, file);
+        answer = s.answer(retry_id, ANSWER);
+    }
     assert!(answered_by(&answer, file.parent().unwrap()), "{answer}");
+}
+
+#[test]
+fn workspace_a_request_held_for_the_ceiling_is_not_idle_stopped() {
+    let _light = light();
+    let ws = Workspace::new("held-not-idle");
+    // Ready after 4 s: the first ask is refused at the 3 s ceiling.
+    let a = ws.python("a", &[("FAKE_READY_DELAY", "4")]);
+    let file = a.join("x.py");
+    let mut s = ws.start(
+        &[
+            ("FLEET_LSP_IDLE_SECONDS", "1"),
+            ("FLEET_LSP_CEILING_MS", "3000"),
+        ],
+        "python",
+    );
+    s.open(&file, "python");
+    s.definition(1, &file);
+    let first = s.answer(1, Duration::from_secs(20));
+    assert!(first.contains("server not ready after 3s"), "{first}");
+    // Asked again at once (and again while a loaded machine keeps it
+    // starting): the same child answers. Were the refused request's 3 s
+    // counted as idle, the child would be stopped and started again.
+    let mut answered = false;
+    for id in 2..=6u32 {
+        s.definition(id, &file);
+        let next = s.answer(id, Duration::from_secs(20));
+        if answered_by(&next, &a) {
+            answered = true;
+            break;
+        }
+        assert!(next.contains("server not ready"), "{next}");
+    }
+    assert!(answered, "never answered");
+    assert_eq!(count_kind(&a, "root"), 1, "no restart");
 }
 
 #[test]
