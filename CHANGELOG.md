@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.5.6
 
 - A request held or in flight counts as use, so a slot is no longer
   idle-stopped the moment a long-held request is answered (affected only
   `FLEET_LSP_IDLE_SECONDS` shorter than the ceiling).
+- The plugin requires fleet-lsp 0.5.6. Rolling back to 0.5.5: point the
+  marketplace at `ref: v0.5.5`, update the plugin, and put the 0.5.5 binary
+  first on PATH.
 
 ## v0.5.5
 
