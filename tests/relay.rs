@@ -1940,3 +1940,317 @@ fn workspace_a_child_of_a_deleted_root_is_retired_without_a_death() {
     assert!(answered_by(&ok, &a), "{ok}");
     assert_eq!(count_kind(&a, "root"), rounds + 1);
 }
+
+// ----------------------------------------------- a root gone, a child idle
+
+impl Session {
+    fn change(&mut self, file: &Path, version: u32) {
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"{}","version":{version}}},"contentChanges":[{{"text":"x = {version}\n"}}]}}}}"#,
+            uri(file)
+        ));
+    }
+
+    fn close(&mut self, file: &Path) {
+        self.send(&format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didClose","params":{{"textDocument":{{"uri":"{}"}}}}}}"#,
+            uri(file)
+        ));
+    }
+}
+
+/// Whether `repo`'s fake logged at least `n` events of `kind` within `d`.
+fn wait_for_count(repo: &Path, kind: &str, n: usize, d: Duration) -> bool {
+    let deadline = Instant::now() + d;
+    while Instant::now() < deadline {
+        if count_kind(repo, kind) >= n {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// The position of the first event of `kind` in `repo`'s log.
+fn first_index(repo: &Path, kind: &str) -> Option<usize> {
+    events(repo)
+        .iter()
+        .position(|l| l.split(' ').nth(1) == Some(kind))
+}
+
+/// Opens `file` and asks one question, so a child is up and the document is
+/// in the store. The caller's `id` is the question's.
+fn open_and_ask(s: &mut Session, file: &Path, id: u32) {
+    s.open(file, "python");
+    s.definition(id, file);
+    let answer = s.answer(id, ANSWER);
+    assert!(answered_by(&answer, file.parent().unwrap()), "{answer}");
+}
+
+#[test]
+fn workspace_a_gone_root_is_stopped_without_a_request() {
+    let _light = light();
+    let ws = Workspace::new("stop-gone");
+    let a = ws.python("a", &[]);
+    let real = fs::canonicalize(&a).unwrap();
+    let mut s = ws.start(&[], "python");
+    s.definition(1, &a.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    let pid = pids(&a.join("events.log"))[0];
+    fs::remove_dir_all(&a).unwrap();
+    assert!(
+        gone_within(pid, Duration::from_secs(10)),
+        "the child outlived its root"
+    );
+    assert!(
+        ws.log_has(
+            &ws.dir,
+            "python",
+            "its project root no longer exists",
+            Duration::from_secs(5)
+        ),
+        "{}",
+        session_log(&ws, "python")
+    );
+    let log = session_log(&ws, "python");
+    assert!(
+        log.lines()
+            .any(|l| l.contains("retired") && l.contains("its project root no longer exists")),
+        "{log}"
+    );
+    s.definition(2, &a.join("x.py"));
+    let refused = s.answer(2, ANSWER);
+    assert!(names_gone_root(&refused, &a, &real), "{refused}");
+    let a = ws.python("a", &[]);
+    s.definition(3, &a.join("x.py"));
+    let back = s.answer(3, ANSWER);
+    assert!(answered_by(&back, &a), "{back}");
+    assert_eq!(count_kind(&a, "root"), 1);
+}
+
+#[test]
+fn workspace_an_idle_child_is_shut_down_and_started_again_on_a_request() {
+    let _light = light();
+    let ws = Workspace::new("idle-request");
+    let a = ws.python("a", &[]);
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "2")], "python");
+    open_and_ask(&mut s, &a.join("x.py"), 1);
+    let pid = pids(&a.join("events.log"))[0];
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(gone_within(pid, Duration::from_secs(10)));
+    let (shutdown, exit) = (first_index(&a, "shutdown"), first_index(&a, "exit"));
+    assert!(shutdown.is_some() && shutdown < exit, "{:?}", events(&a));
+    let log = session_log(&ws, "python");
+    assert!(log.contains("idle for 2s"), "{log}");
+    assert!(!log.contains("its server died"), "{log}");
+    s.definition(2, &a.join("x.py"));
+    let again = s.answer(2, ANSWER);
+    assert!(answered_by(&again, &a), "{again}");
+    assert_eq!(count_kind(&a, "root"), 2);
+    assert_eq!(count_kind(&a, "open"), 2, "the document was replayed");
+}
+
+#[test]
+fn workspace_idle_stops_are_not_deaths() {
+    let _light = light();
+    let ws = Workspace::new("idle-cycles");
+    let a = ws.python("a", &[]);
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "1")], "python");
+    for round in 0..3u32 {
+        s.definition(round + 1, &a.join("x.py"));
+        assert!(answered_by(&s.answer(round + 1, ANSWER), &a));
+        assert!(
+            wait_for_count(&a, "exit", round as usize + 1, Duration::from_secs(20)),
+            "round {round}"
+        );
+    }
+    s.definition(4, &a.join("x.py"));
+    let last = s.answer(4, ANSWER);
+    assert!(answered_by(&last, &a), "{last}");
+    assert_eq!(count_kind(&a, "root"), 4);
+}
+
+#[test]
+fn workspace_an_edit_alone_starts_an_idle_stopped_root_with_the_edit_replayed() {
+    let _light = light();
+    let ws = Workspace::new("idle-edit");
+    let a = ws.python("a", &[]);
+    let file = a.join("x.py");
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "2")], "python");
+    open_and_ask(&mut s, &file, 1);
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(ws.log_has(&ws.dir, "python", "retired", Duration::from_secs(10)));
+    s.change(&file, 2);
+    assert!(wait_for_count(&a, "root", 2, Duration::from_secs(5)));
+    assert!(wait_for_count(&a, "open", 2, Duration::from_secs(5)));
+    thread::sleep(Duration::from_millis(500));
+    let edited = format!("open {} 2", uri(&file));
+    assert_eq!(count(&a, &edited), 1, "{:?}", events(&a));
+    assert_eq!(count(&a, "recv textDocument/didChange"), 0);
+    assert!(ws.log_has(&ws.dir, "python", "after idle stop", Duration::from_secs(5)));
+}
+
+#[test]
+fn workspace_a_close_alone_does_not_start_an_idle_stopped_root() {
+    let _light = light();
+    let ws = Workspace::new("idle-close");
+    let a = ws.python("a", &[]);
+    let b = ws.python("b", &[]);
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "2")], "python");
+    open_and_ask(&mut s, &a.join("x.py"), 1);
+    open_and_ask(&mut s, &b.join("x.py"), 2);
+    assert!(wait_for_count(&b, "exit", 1, Duration::from_secs(20)));
+    s.close(&b.join("x.py"));
+    thread::sleep(Duration::from_secs(5));
+    assert_eq!(count_kind(&b, "root"), 1);
+}
+
+#[test]
+fn workspace_a_delayed_shutdown_reply_comes_before_exit_and_eof() {
+    let _light = light();
+    let ws = Workspace::new("idle-delayed");
+    let a = ws.python("a", &[("FAKE_SHUTDOWN_DELAY", "3")]);
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "1")], "python");
+    open_and_ask(&mut s, &a.join("x.py"), 1);
+    let pid = pids(&a.join("events.log"))[0];
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(gone_within(pid, Duration::from_secs(10)));
+    let log = events(&a).join("\n");
+    assert!(!log.contains("eof-before-reply"), "{log}");
+    assert!(!log.contains("input-before-reply"), "{log}");
+    let (reply, exit) = (first_index(&a, "shutdown-reply"), first_index(&a, "exit"));
+    assert!(reply.is_some() && reply < exit, "{log}");
+    assert_eq!(count_kind(&a, "exit"), 1);
+}
+
+#[test]
+fn workspace_a_missing_shutdown_reply_ends_in_a_forced_stop_not_a_death() {
+    let _light = light();
+    let ws = Workspace::new("idle-no-reply");
+    let a = ws.python("a", &[("FAKE_IGNORE_SHUTDOWN", "1")]);
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "1")], "python");
+    open_and_ask(&mut s, &a.join("x.py"), 1);
+    let pid = pids(&a.join("events.log"))[0];
+    assert!(gone_within(pid, Duration::from_secs(30)));
+    assert!(ws.log_has(
+        &ws.dir,
+        "python",
+        "no reply to shutdown",
+        Duration::from_secs(5)
+    ));
+    assert!(!session_log(&ws, "python").contains("its server died"));
+    s.definition(2, &a.join("x.py"));
+    assert!(answered_by(&s.answer(2, ANSWER), &a));
+}
+
+#[test]
+fn workspace_an_ignored_exit_ends_in_a_forced_stop_not_a_death() {
+    let _light = light();
+    let ws = Workspace::new("idle-ignored-exit");
+    let a = ws.python("a", &[("FAKE_IGNORE_EXIT", "1")]);
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "1")], "python");
+    open_and_ask(&mut s, &a.join("x.py"), 1);
+    let pid = pids(&a.join("events.log"))[0];
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(gone_within(pid, Duration::from_secs(30)));
+    assert!(ws.log_has(
+        &ws.dir,
+        "python",
+        "did not exit after exit",
+        Duration::from_secs(5)
+    ));
+    assert!(!session_log(&ws, "python").contains("its server died"));
+}
+
+#[test]
+fn workspace_a_child_that_never_initializes_is_retired_after_the_ceiling() {
+    let _light = light();
+    let ws = Workspace::new("init-request");
+    let a = ws.python("a", &[("FAKE_NEVER_INIT", "1")]);
+    // Generous: a fresh fake script can be slow to exec on a loaded machine.
+    let mut s = ws.start(&[("FLEET_LSP_CEILING_MS", "6000")], "python");
+    for round in 1..=2u32 {
+        s.definition(round, &a.join("x.py"));
+        let failed = s.answer(round, Duration::from_secs(30));
+        assert!(failed.contains("initialization timed out"), "{failed}");
+        if let Some(pid) = pids(&a.join("events.log")).last() {
+            assert!(gone_within(*pid, Duration::from_secs(10)));
+        }
+    }
+    s.drain(Duration::from_millis(500));
+    for round in 1..=2u32 {
+        let needle = format!(r#""id":{round},"#);
+        assert_eq!(s.frames_with(&needle), 1, "one failure per request");
+    }
+    let log = session_log(&ws, "python");
+    assert_eq!(log.matches("initialization timeout").count(), 2, "{log}");
+}
+
+#[test]
+fn workspace_a_child_restarted_by_an_edit_that_never_initializes_is_retired() {
+    let _light = light();
+    let ws = Workspace::new("init-edit");
+    let a = ws.python("a", &[]);
+    let file = a.join("x.py");
+    let mut s = ws.start(
+        &[
+            ("FLEET_LSP_IDLE_SECONDS", "1"),
+            ("FLEET_LSP_CEILING_MS", "10000"),
+        ],
+        "python",
+    );
+    open_and_ask(&mut s, &file, 1);
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(ws.log_has(&ws.dir, "python", "retired", Duration::from_secs(10)));
+    fake_env(&a, &[("FAKE_NEVER_INIT", "1")]);
+    s.change(&file, 2);
+    assert!(wait_for_count(
+        &a,
+        "never-answering-initialize",
+        1,
+        Duration::from_secs(10)
+    ));
+    let pid = *pids(&a.join("events.log")).last().unwrap();
+    assert!(gone_within(pid, Duration::from_secs(20)));
+    assert!(ws.log_has(
+        &ws.dir,
+        "python",
+        "initialization timeout",
+        Duration::from_secs(10)
+    ));
+    thread::sleep(Duration::from_secs(2));
+    assert_eq!(count_kind(&a, "root"), 2, "no further start on its own");
+}
+
+#[test]
+fn workspace_an_older_slots_late_retirement_keeps_the_newer_idle_marker() {
+    let _light = light();
+    let ws = Workspace::new("idle-generations");
+    let a = ws.python("a", &[("FAKE_SHUTDOWN_DELAY", "4")]);
+    let file = a.join("x.py");
+    let mut s = ws.start(&[("FLEET_LSP_IDLE_SECONDS", "1")], "python");
+    open_and_ask(&mut s, &file, 1);
+    assert!(wait_for_count(&a, "shutdown", 1, Duration::from_secs(20)));
+    // The second child starts while the first still waits to close.
+    s.definition(2, &file);
+    assert!(answered_by(&s.answer(2, ANSWER), &a));
+    assert!(wait_for_count(&a, "shutdown", 2, Duration::from_secs(20)));
+    // The first child's retirement lands while the second is closing.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while session_log(&ws, "python").matches("idle for 1s,").count() < 1
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        session_log(&ws, "python").matches("idle for 1s,").count(),
+        1,
+        "the second child is still closing"
+    );
+    s.change(&file, 2);
+    assert!(
+        wait_for_count(&a, "root", 3, Duration::from_secs(5)),
+        "the newer marker survived: {:?}",
+        events(&a)
+    );
+}

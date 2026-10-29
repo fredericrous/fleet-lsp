@@ -23,6 +23,10 @@ FAKE_RA_MESSAGE   the status message
 FAKE_IGNORE_SHUTDOWN  never answer `shutdown`
 FAKE_IGNORE_EXIT  stay up after `exit` and after EOF
 FAKE_CRASH_AT_START  exit 4 on `initialize`, before answering it
+FAKE_NEVER_INIT   never answer `initialize` (and never read again)
+FAKE_SHUTDOWN_DELAY  seconds to wait before answering `shutdown`; input or
+                  EOF arriving meanwhile is logged as `input-before-reply`
+                  or `eof-before-reply`, and the reply as `shutdown-reply`
 
 A `.fake-env` file in the working directory (one KEY=VALUE per line) sets
 these per repository, for the workspace-mode tests that run several fakes
@@ -30,7 +34,7 @@ under one fleet-lsp. Every answer to a request carries `cwd`, so a test
 sees which fake answered. Events added for those tests: `root <rootUri>`,
 `init-params <params as sorted JSON>`, `open <uri> <version>`.
 """
-import json, os, sys, time, threading
+import json, os, select, sys, time, threading
 
 if os.path.exists(".fake-env"):
     for line in open(".fake-env").read().splitlines():
@@ -133,6 +137,21 @@ def stay_up():
         time.sleep(3600)
 
 
+def wait_before_reply(reader, seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        ready, _, _ = select.select([0], [], [], left)
+        if ready:
+            if not reader.fill():
+                event("eof-before-reply")
+                return
+            event("input-before-reply")
+            return
+
+
 def main():
     event("pid", str(os.getpid()))
     rate = os.environ.get("FAKE_SLOW_READ")
@@ -159,6 +178,9 @@ def main():
             if os.environ.get("FAKE_CRASH_AT_START"):
                 event("crash")
                 os._exit(4)
+            if os.environ.get("FAKE_NEVER_INIT"):
+                event("never-answering-initialize")
+                stay_up()
             send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {"referencesProvider": True}}})
         elif method == "initialized":
             if os.environ.get("FAKE_EXIT_AFTER"):
@@ -186,7 +208,11 @@ def main():
             event("open", f"{doc.get('uri')} {doc.get('version')}")
         elif method == "shutdown":
             shutdown = True
+            event("shutdown")
+            if os.environ.get("FAKE_SHUTDOWN_DELAY"):
+                wait_before_reply(r, float(os.environ["FAKE_SHUTDOWN_DELAY"]))
             if not os.environ.get("FAKE_IGNORE_SHUTDOWN"):
+                event("shutdown-reply")
                 send({"jsonrpc": "2.0", "id": mid, "result": None})
         elif method == "exit":
             event("exit")

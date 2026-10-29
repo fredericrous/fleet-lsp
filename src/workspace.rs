@@ -20,7 +20,7 @@ use crate::relay::{self, Ev, HUNG, OWN_CAP, QUEUE_CAP, TEARDOWN, TICK};
 use crate::resolve::{self, Located, Resolution};
 use crate::route::{self, refusal, Applied, Documents, Recent};
 use crate::scan::{scan, Id, Kind};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
@@ -35,8 +35,14 @@ pub(crate) const DEFAULT_MAX_CHILDREN: usize = 4;
 /// A root whose child died this often (the first start and the plugin's
 /// `maxRestarts` of 2) is refused; an eviction is not a death.
 const MAX_DEATHS: u32 = 3;
-/// How long the client's `shutdown` waits for every child's reply.
+/// How long the client's `shutdown` waits for every child's reply, and a
+/// child that fleet-lsp closes itself waits for its `shutdown` reply.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+/// How often the served roots are looked for on disk.
+const ROOT_CHECK_EVERY: Duration = Duration::from_secs(5);
+/// Idle seconds before a quiet child is stopped, when
+/// `FLEET_LSP_IDLE_SECONDS` is unset; 0 turns idle stops off.
+pub(crate) const DEFAULT_IDLE_SECONDS: u64 = 1800;
 
 /// What the loop hears.
 enum Event {
@@ -62,12 +68,30 @@ enum Phase {
     Starting {
         init: Id,
         waiting: Vec<Vec<u8>>,
+        /// The child is killed and counted as a death if it has not
+        /// answered by then.
+        deadline: Instant,
     },
     Live,
-    /// Shut down by fleet-lsp (an eviction); killed after `TEARDOWN`.
+    /// Closed by fleet-lsp (an eviction or an idle stop) with the LSP
+    /// handshake: its `shutdown` is out, `exit` follows the reply, stdin is
+    /// closed after `exit`, and the child is killed when the stage's
+    /// deadline passes. Not a death.
     Closing {
-        since: Instant,
+        why: String,
+        shutdown_id: Id,
+        stage: CloseStage,
+        deadline: Instant,
     },
+}
+
+/// What a closing child is waited for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseStage {
+    /// The reply to fleet-lsp's `shutdown`, within `SHUTDOWN_WAIT`.
+    AwaitingShutdown,
+    /// The child's exit after `exit`, within `TEARDOWN`.
+    AwaitingExit,
 }
 
 struct Slot {
@@ -81,6 +105,8 @@ struct Slot {
     stdout_closed: bool,
     stdin_broken: bool,
     log_path: String,
+    /// The last client request or notification routed here.
+    last_used: Instant,
 }
 
 /// What is known about a project root.
@@ -102,6 +128,8 @@ pub(crate) struct Settings {
     pub(crate) lang: Lang,
     pub(crate) ceiling: Duration,
     pub(crate) max_children: usize,
+    /// A quiet child idle this long is stopped; zero never stops one.
+    pub(crate) idle: Duration,
     /// The directory the client's `initialize` named.
     pub(crate) session_root: PathBuf,
 }
@@ -117,6 +145,24 @@ pub(crate) fn max_children_from_env() -> (usize, Option<String>) {
                 DEFAULT_MAX_CHILDREN,
                 Some(format!(
                     "FLEET_LSP_MAX_CHILDREN={v:?} is not a positive number; using {DEFAULT_MAX_CHILDREN}"
+                )),
+            ),
+        },
+    }
+}
+
+/// `FLEET_LSP_IDLE_SECONDS`, validated: the idle time, and a note for the
+/// log when the value was not usable. Zero is valid and means never.
+pub(crate) fn idle_from_env() -> (Duration, Option<String>) {
+    let default = Duration::from_secs(DEFAULT_IDLE_SECONDS);
+    match std::env::var("FLEET_LSP_IDLE_SECONDS") {
+        Err(_) => (default, None),
+        Ok(v) => match v.trim().parse::<u64>() {
+            Ok(seconds) => (Duration::from_secs(seconds), None),
+            Err(_) => (
+                default,
+                Some(format!(
+                    "FLEET_LSP_IDLE_SECONDS={v:?} is not a number of seconds; using {DEFAULT_IDLE_SECONDS}"
                 )),
             ),
         },
@@ -166,6 +212,11 @@ struct Workspace {
     shutdown_seen: bool,
     exit_seen: bool,
     exit: Option<u8>,
+    last_root_check: Instant,
+    /// Roots whose child was stopped for sitting idle: an open or an edit of
+    /// one of their documents starts it again. Retiring a slot never edits
+    /// it, so an older child's late reap cannot erase a newer stop.
+    idle_stopped: HashSet<PathBuf>,
 }
 
 impl Workspace {
@@ -197,6 +248,8 @@ impl Workspace {
             shutdown_seen: false,
             exit_seen: false,
             exit: None,
+            last_root_check: Instant::now(),
+            idle_stopped: HashSet::new(),
         }
     }
 
@@ -389,8 +442,9 @@ impl Workspace {
     }
 
     /// A `didOpen`/`didChange`/`didClose`: always folded into the store; a
-    /// live child of its root also gets it. A notification never starts a
-    /// child, and one starting gets the store replayed once it is up.
+    /// live child of its root also gets it. A notification starts a child
+    /// only for an idle-stopped root, and one starting gets the store
+    /// replayed once it is up.
     fn document(&mut self, body: Vec<u8>, method: &str) {
         let Some(msg) = parse(&body) else {
             self.log.line(&format!("{method}: not JSON; dropped"));
@@ -408,6 +462,23 @@ impl Workspace {
         if method == "textDocument/didOpen" && !self.root_is_closed(&root) {
             self.recent.touch(&root);
             self.recent_reason = "most recently opened";
+        }
+        // An idle-stopped root starts again for an open or an edit (not a
+        // close); the child gets the store, with this change folded in, once
+        // it is up. A failure leaves the notification in the store only.
+        if method != "textDocument/didClose"
+            && self.idle_stopped.contains(&root)
+            && self.shutdown.is_none()
+            && !self.shutdown_seen
+        {
+            let _ = self.slot_for(&root); // slot_for logs and clears the marker; the store holds the document
+        }
+        if let Some(slot) = self
+            .serving
+            .get(&root)
+            .and_then(|id| self.slots.get_mut(id))
+        {
+            slot.last_used = Instant::now();
         }
         let live = self
             .serving
@@ -514,7 +585,12 @@ impl Workspace {
     fn exit_now(&mut self) {
         self.exit_seen = true;
         let exit = notification("exit");
-        for slot in self.slots.values_mut() {
+        // A closing child has its own `exit` to wait for.
+        for slot in self
+            .slots
+            .values_mut()
+            .filter(|s| !matches!(s.phase, Phase::Closing { .. }))
+        {
             slot.outbox.push(exit.clone());
         }
         self.exit = Some(if self.shutdown_seen { 0 } else { 1 });
@@ -581,8 +657,24 @@ impl Workspace {
         }
     }
 
-    /// The slot serving `root`, started if need be.
+    /// The slot serving `root`, started if need be, and marked as used. The
+    /// idle-stop marker of `root` ends here whether the start worked or not.
     fn slot_for(&mut self, root: &Path) -> Result<u64, String> {
+        let result = self.slot_for_root(root);
+        let was_idle_stopped = self.idle_stopped.remove(root);
+        if let Ok(slot) = &result {
+            if let Some(s) = self.slots.get_mut(slot) {
+                s.last_used = Instant::now();
+                if was_idle_stopped {
+                    let line = format!("restarted {} after idle stop", s.repo);
+                    self.log.line(&line);
+                }
+            }
+        }
+        result
+    }
+
+    fn slot_for_root(&mut self, root: &Path) -> Result<u64, String> {
         if !root.exists() {
             if let Some(slot) = self.serving.get(root).copied() {
                 self.retire(slot, "its project root no longer exists");
@@ -643,28 +735,42 @@ impl Workspace {
         let Some(victim) = self.recent.evictable(live, &root.to_path_buf()).cloned() else {
             return;
         };
-        let Some(slot) = self.serving.remove(&victim) else {
+        let Some(slot) = self.serving.get(&victim).copied() else {
             return;
         };
-        self.log.line(&format!(
-            "evicted {} (cap {})",
-            tilde(&victim),
-            self.settings.max_children
-        ));
+        let cap = self.settings.max_children;
+        self.log
+            .line(&format!("evicted {} (cap {cap})", tilde(&victim)));
+        self.close_slot(slot, format!("evicted at cap {cap}"));
+    }
+
+    /// Closes a live child with the LSP handshake: it is no longer served,
+    /// what it holds is drained, `shutdown` goes out and its id is kept, so
+    /// that `own_reply` sends `exit` once the reply comes. Housekeeping ends
+    /// it if a stage outlasts its deadline. Not a death.
+    fn close_slot(&mut self, slot: u64, why: String) {
+        let Some(root) = self.slots.get(&slot).map(|s| s.root.clone()) else {
+            return;
+        };
+        if self.serving.get(&root) == Some(&slot) {
+            self.serving.remove(&root);
+        }
         let drained = self
             .slots
             .get_mut(&slot)
             .map(|s| s.core.drain_for_shutdown());
         self.apply(slot, drained.unwrap_or_default());
-        if matches!(self.slots.get(&slot).map(|s| &s.phase), Some(Phase::Live)) {
-            self.own_request(slot, "shutdown");
-            if let Some(s) = self.slots.get_mut(&slot) {
-                s.outbox.push(notification("exit"));
-            }
+        if !matches!(self.slots.get(&slot).map(|s| &s.phase), Some(Phase::Live)) {
+            self.retire(slot, &why);
+            return;
         }
+        let shutdown_id = self.own_request(slot, "shutdown");
         if let Some(s) = self.slots.get_mut(&slot) {
             s.phase = Phase::Closing {
-                since: Instant::now(),
+                why,
+                shutdown_id,
+                stage: CloseStage::AwaitingShutdown,
+                deadline: Instant::now() + SHUTDOWN_WAIT,
             };
         }
     }
@@ -742,10 +848,12 @@ impl Workspace {
                 phase: Phase::Starting {
                     init: init_id,
                     waiting: Vec::new(),
+                    deadline: Instant::now() + self.settings.ceiling,
                 },
                 stdout_closed: false,
                 stdin_broken: false,
                 log_path,
+                last_used: Instant::now(),
             },
         );
         self.serving.insert(root.to_path_buf(), slot);
@@ -832,6 +940,22 @@ impl Workspace {
     }
 
     fn own_reply(&mut self, slot: u64, id: &Id, body: &[u8]) {
+        if let Some(s) = self.slots.get_mut(&slot) {
+            if let Phase::Closing {
+                shutdown_id,
+                stage,
+                deadline,
+                ..
+            } = &mut s.phase
+            {
+                if shutdown_id == id && *stage == CloseStage::AwaitingShutdown {
+                    *stage = CloseStage::AwaitingExit;
+                    *deadline = Instant::now() + TEARDOWN;
+                    s.outbox.push(notification("exit"));
+                }
+                return;
+            }
+        }
         let answered_init = matches!(
             self.slots.get(&slot).map(|s| &s.phase),
             Some(Phase::Starting { init, .. }) if init == id
@@ -1002,25 +1126,22 @@ impl Workspace {
 
     fn housekeeping(&mut self) {
         let now = Instant::now();
+        self.sweep_slots(now);
         let slots: Vec<u64> = self.slots.keys().copied().collect();
         for slot in slots {
             let Some(s) = self.slots.get_mut(&slot) else {
                 continue;
             };
-            if let Phase::Closing { since } = s.phase {
-                let cap = self.settings.max_children;
-                match s.child.try_wait() {
-                    Ok(Some(status)) => {
-                        self.retire(slot, &format!("evicted at cap {cap}, {status}"))
-                    }
-                    Ok(None) if now.saturating_duration_since(since) < TEARDOWN => {}
-                    Ok(None) => self.retire(slot, "evicted, did not exit after shutdown; killed"),
-                    Err(e) => self.retire(
-                        slot,
-                        &format!("evicted, its status is unreadable: {e}; killed"),
-                    ),
+            match &s.phase {
+                Phase::Closing { .. } => {
+                    self.check_closing(slot, now);
+                    continue;
                 }
-                continue;
+                Phase::Starting { deadline, .. } if now >= *deadline => {
+                    self.init_timed_out(slot);
+                    continue;
+                }
+                Phase::Starting { .. } | Phase::Live => {}
             }
             if s.stdout_closed || s.stdin_broken {
                 if let Ok(Some(status)) = s.child.try_wait() {
@@ -1043,6 +1164,130 @@ impl Workspace {
         }
     }
 
+    /// Stops the children whose root left the disk and those left idle: the
+    /// facts are gathered here, the decision is `sweep`'s.
+    fn sweep_slots(&mut self, now: Instant) {
+        if !may_sweep(self.shutdown.is_some(), self.shutdown_seen) {
+            return;
+        }
+        let check = now.saturating_duration_since(self.last_root_check) >= ROOT_CHECK_EVERY;
+        if check {
+            self.last_root_check = now;
+        }
+        let mut notes = Vec::new();
+        let views: Vec<SlotView> = self
+            .slots
+            .iter()
+            .map(|(id, s)| {
+                let served = self.serving.get(&s.root) == Some(id);
+                let root_exists = if check && served {
+                    match s.root.try_exists() {
+                        Ok(exists) => Some(exists),
+                        Err(e) => {
+                            notes.push(format!(
+                                "could not look for {} ({e}); its server is kept",
+                                tilde(&s.root)
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                SlotView {
+                    slot: *id,
+                    root_exists,
+                    last_used: s.last_used,
+                    phase: match s.phase {
+                        Phase::Starting { .. } => PhaseView::Starting,
+                        Phase::Live => PhaseView::Live,
+                        Phase::Closing { .. } => PhaseView::Closing,
+                    },
+                    quiet: s.core.is_quiet(),
+                }
+            })
+            .collect();
+        let mut gone_idle = Vec::new();
+        if check {
+            for root in &self.idle_stopped {
+                if matches!(root.try_exists(), Ok(false)) {
+                    gone_idle.push(root.clone());
+                }
+            }
+        }
+        for note in notes {
+            self.log.line(&note);
+        }
+        for root in gone_idle {
+            self.idle_stopped.remove(&root);
+            self.recent.forget(&root);
+        }
+        for (slot, stop) in sweep(now, &views, &self.settings) {
+            let Some(root) = self.slots.get(&slot).map(|s| s.root.clone()) else {
+                continue;
+            };
+            match stop {
+                Stop::RootGone => {
+                    self.retire(slot, "its project root no longer exists");
+                    self.recent.forget(&root);
+                    self.idle_stopped.remove(&root);
+                }
+                Stop::Idle => {
+                    let why = format!("idle for {}s", self.settings.idle.as_secs());
+                    self.idle_stopped.insert(root);
+                    self.close_slot(slot, why);
+                }
+            }
+        }
+    }
+
+    /// A closing child that exited is reaped; one that outlasts its stage's
+    /// deadline is killed, and the log says it was forced.
+    fn check_closing(&mut self, slot: u64, now: Instant) {
+        let Some(s) = self.slots.get_mut(&slot) else {
+            return;
+        };
+        let Phase::Closing {
+            why,
+            stage,
+            deadline,
+            ..
+        } = &s.phase
+        else {
+            return;
+        };
+        let (why, stage, deadline) = (why.clone(), *stage, *deadline);
+        match s.child.try_wait() {
+            Ok(Some(status)) => self.retire(slot, &format!("{why}, {status}")),
+            Ok(None) if now < deadline => {}
+            Ok(None) => {
+                let forced = match stage {
+                    CloseStage::AwaitingShutdown => "no reply to shutdown",
+                    CloseStage::AwaitingExit => "did not exit after exit",
+                };
+                self.retire(slot, &format!("{why}, {forced}; killed (forced)"));
+            }
+            Err(e) => self.retire(
+                slot,
+                &format!("{why}, its status is unreadable: {e}; killed"),
+            ),
+        }
+    }
+
+    /// A child that never answered `initialize`: one death against its
+    /// root, whatever waited for it is failed by the retirement.
+    fn init_timed_out(&mut self, slot: u64) {
+        let Some(repo) = self.slots.get(&slot).map(|s| s.repo.clone()) else {
+            return;
+        };
+        self.log.line(&format!(
+            "{repo} (slot {slot}): initialization timeout after {}s",
+            self.settings.ceiling.as_secs()
+        ));
+        self.count_death(slot);
+        self.retire(slot, "initialization timed out");
+    }
+
     fn send_to_client(&mut self, body: Vec<u8>) {
         self.outbox_client_bytes += body.len();
         self.outbox_client.push(body);
@@ -1058,8 +1303,15 @@ impl Workspace {
                 sent += 1;
             }
             s.outbox.drain(..sent);
-            // An evicted child gets its `shutdown` and `exit`, then EOF.
-            if matches!(s.phase, Phase::Closing { .. }) && s.outbox.is_empty() {
+            // A closed child gets EOF only once its `exit` is flushed.
+            if matches!(
+                s.phase,
+                Phase::Closing {
+                    stage: CloseStage::AwaitingExit,
+                    ..
+                }
+            ) && s.outbox.is_empty()
+            {
                 s.child_in.close();
             }
         }
@@ -1130,6 +1382,53 @@ impl Workspace {
         }
         code
     }
+}
+
+/// Whether the slots are swept: not once the client has asked to shut down.
+fn may_sweep(shutdown_pending: bool, shutdown_seen: bool) -> bool {
+    !shutdown_pending && !shutdown_seen
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseView {
+    Starting,
+    Live,
+    Closing,
+}
+
+/// What `sweep` knows of one slot.
+#[derive(Clone, Copy)]
+struct SlotView {
+    slot: u64,
+    /// None when this tick did not look.
+    root_exists: Option<bool>,
+    last_used: Instant,
+    phase: PhaseView,
+    /// Nothing held, in flight or waiting in its `Core`.
+    quiet: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    RootGone,
+    Idle,
+}
+
+/// Which slots to stop: a calculation over what the loop gathered.
+fn sweep(now: Instant, slots: &[SlotView], settings: &Settings) -> Vec<(u64, Stop)> {
+    slots
+        .iter()
+        .filter_map(|v| {
+            if v.root_exists == Some(false) {
+                return Some((v.slot, Stop::RootGone));
+            }
+            let idle = !settings.idle.is_zero()
+                && v.phase == PhaseView::Live
+                && v.quiet
+                && now.saturating_duration_since(v.last_used) >= settings.idle;
+            idle.then_some((v.slot, Stop::Idle))
+        })
+        .collect()
 }
 
 /// The client's `initialize`, for one child: fleet-lsp's own id, and the
@@ -1264,5 +1563,120 @@ fn stderr_to_log(stderr: ChildStderr, mut log: Log) {
             Ok(line) => log.line(&line),
             Err(_) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDLE: Duration = Duration::from_secs(1800);
+
+    fn settings(idle: Duration) -> Settings {
+        Settings {
+            lang: Lang::Python,
+            ceiling: Duration::from_secs(370),
+            max_children: DEFAULT_MAX_CHILDREN,
+            idle,
+            session_root: PathBuf::from("/session"),
+        }
+    }
+
+    fn view(slot: u64, last_used: Instant) -> SlotView {
+        SlotView {
+            slot,
+            root_exists: Some(true),
+            last_used,
+            phase: PhaseView::Live,
+            quiet: true,
+        }
+    }
+
+    /// An instant `minutes` before `now`.
+    fn ago(now: Instant, minutes: u64) -> Instant {
+        now - Duration::from_secs(minutes * 60)
+    }
+
+    #[test]
+    fn a_gone_root_is_stopped_whatever_its_idleness() {
+        let now = Instant::now();
+        let mut fresh = view(1, now);
+        fresh.root_exists = Some(false);
+        let mut starting = view(2, now);
+        starting.root_exists = Some(false);
+        starting.phase = PhaseView::Starting;
+        let mut busy = view(3, now);
+        busy.root_exists = Some(false);
+        busy.quiet = false;
+        for idle in [IDLE, Duration::ZERO] {
+            assert_eq!(
+                sweep(now, &[fresh, starting, busy], &settings(idle)),
+                vec![
+                    (1, Stop::RootGone),
+                    (2, Stop::RootGone),
+                    (3, Stop::RootGone)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_used_root_is_idle_from_the_setting_on() {
+        let now = Instant::now();
+        let kept = sweep(now, &[view(1, ago(now, 29))], &settings(IDLE));
+        assert_eq!(kept, vec![]);
+        let stopped = sweep(now, &[view(1, ago(now, 30))], &settings(IDLE));
+        assert_eq!(stopped, vec![(1, Stop::Idle)]);
+    }
+
+    #[test]
+    fn a_starting_or_busy_slot_is_never_idle() {
+        let now = Instant::now();
+        let mut starting = view(1, ago(now, 60));
+        starting.phase = PhaseView::Starting;
+        let mut busy = view(2, ago(now, 60));
+        busy.quiet = false;
+        let mut closing = view(3, ago(now, 60));
+        closing.phase = PhaseView::Closing;
+        assert_eq!(
+            sweep(now, &[starting, busy, closing], &settings(IDLE)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn zero_turns_idle_stops_off() {
+        let now = Instant::now();
+        let out = sweep(now, &[view(1, ago(now, 600))], &settings(Duration::ZERO));
+        assert_eq!(out, vec![]);
+    }
+
+    #[test]
+    fn a_root_not_looked_for_this_tick_is_not_gone() {
+        let now = Instant::now();
+        let mut unseen = view(1, now);
+        unseen.root_exists = None;
+        assert_eq!(sweep(now, &[unseen], &settings(IDLE)), vec![]);
+    }
+
+    #[test]
+    fn nothing_is_swept_during_the_clients_shutdown() {
+        assert!(may_sweep(false, false));
+        assert!(!may_sweep(true, false));
+        assert!(!may_sweep(false, true));
+        assert!(!may_sweep(true, true));
+    }
+
+    #[test]
+    fn the_idle_setting_keeps_its_default_for_a_bad_value() {
+        // Env is process-wide: this is the only test that touches it.
+        std::env::set_var("FLEET_LSP_IDLE_SECONDS", "soon");
+        let (idle, note) = idle_from_env();
+        assert_eq!(idle, Duration::from_secs(DEFAULT_IDLE_SECONDS));
+        assert!(note.is_some_and(|n| n.contains("FLEET_LSP_IDLE_SECONDS")));
+        std::env::set_var("FLEET_LSP_IDLE_SECONDS", "0");
+        assert_eq!(idle_from_env(), (Duration::ZERO, None));
+        std::env::remove_var("FLEET_LSP_IDLE_SECONDS");
+        assert_eq!(idle_from_env().0, Duration::from_secs(1800));
     }
 }

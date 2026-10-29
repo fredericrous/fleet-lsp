@@ -94,10 +94,15 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
             tilde(&session_root),
             ceiling.as_secs()
         ));
+        let (idle, note) = crate::workspace::idle_from_env();
+        if let Some(note) = note {
+            log.line(&note);
+        }
         let settings = crate::workspace::Settings {
             lang,
             ceiling,
             max_children,
+            idle,
             session_root,
         };
         return crate::workspace::serve(settings, log, client, first);
