@@ -73,7 +73,7 @@ Input → expected → actual. Each new integration test was run alone (`cargo t
 - Idle stop and restart on a request → `shutdown` then `exit`, second child gets the replayed `didOpen` → pass (6 s); 3 idle cycles then a 4th request → pass (7 s).
 - Edit after idle stop → one `didOpen` carrying the edit, no `didChange` → pass (5 s); `didClose` on root B starts no child → pass (9 s).
 - Handshake: delayed reply → no `exit`/EOF before it → pass (5 s); missing reply → forced stop, no death → pass (12 s); ignored `exit` → forced stop, no death → pass (12 s).
-- Init deadline: first start that never initializes → request refused `not ready`, retired at the deadline, one answer per request → pass (29 s); same after a request-triggered idle restart → pass (33 s); after a `didChange`-triggered one → pass (24 s).
+- Init deadline: first start that never initializes → request refused `not ready`, retired at the deadline, one answer per request → pass (29 s); same after a request-triggered idle restart → pass (33 s); after a `didChange`-triggered one → pass (49 s, load 14, after fb76e3d raised its ceiling to 10 s).
 - Overlapping generations → older slot's late retirement keeps the newer idle marker → pass (6 s).
 - `make check` → green → green: 133 unit and 59 integration tests, fmt, clippy `-D warnings`, `check-no-deps`, MSRV (load 15 → 63).
 - Live check after `brew upgrade`: runs after the release, not before this push.
@@ -83,9 +83,10 @@ Input → expected → actual. Each new integration test was run alone (`cargo t
 - 2026-10-29: the relais run was interrupted at its wall time with the work complete. Its candidate was committed as 353f018. The repair run was blocked (`workspace_has_interrupted_run`), and `relais resume --retire` would have removed this worktree. The person chose to commit the candidate and finish by hand.
 - 2026-10-29: Design 5 said the init deadline is "based on `settings.ceiling`". It is now `2 × ceiling + 10 s` (2772119). At exactly the ceiling it pre-empted a request's own readiness refusal: `workspace_a_readiness_refusal_names_its_repository` failed with `initialization timed out` under load, and a merely slow first start was counted as a death.
 - 2026-10-29: under load 50–235 (other sessions' test runs, and XprotectService scanning each fresh fake script) the integration tests time out at a first start. The pre-change commit 294867e fails the same way, so the load is the cause. The suite was judged at low load.
+- 2026-10-29: the push rehearsal at load 52 failed `a_client_that_stops_reading_is_torn_down_after_30s` (unchanged code). It also failed the same way on 294867e. The same rehearsal failed the edit-triggered init test at its first start (5 s ceiling), so fb76e3d gives that test a 10 s ceiling, like its request-triggered twin.
 
 ## Implementation review
 
-Round 1 approve-with-changes: a swallowed `slot_for` refusal (blocking) was fixed by logging it. The gone-root test now loops `MAX_DEATHS` times, a request-triggered init-deadline test was added, and the idle setting is parsed purely (fixed in dace6a0). The unrecorded verification (high) is now recorded above. Delta approve-with-changes: 4 of 5 resolved, and the 5th was settled by the record above. 66k + 72k tokens, 77 s + 24 s.
+Round 1 approve-with-changes: a swallowed `slot_for` refusal (blocking) was fixed by logging it. The gone-root test now loops `MAX_DEATHS` times, a request-triggered init-deadline test was added, and the idle setting is parsed purely (fixed in dace6a0). The unrecorded verification (high) is now recorded above. Delta approve-with-changes: 4 of 5 resolved, and the 5th was settled by the record above. Second delta (fb76e3d, test ceiling): approve-with-changes, one low finding on this record, fixed here. 66k + 72k + 77k tokens, 77 s + 24 s + 20 s.
 
 <!-- panel: repos=fleet-lsp reviewers=backend,lang:rust,codex body-sha=3ae75be02d75 -->
