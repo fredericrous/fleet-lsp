@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/stop-gone-and-idle
 repos: [fleet-lsp]
 adrs: []
@@ -10,7 +10,7 @@ adrs: []
 
 📄 Full reviews: [2026-10-29-stop-gone-and-idle.reviews.md](2026-10-29-stop-gone-and-idle.reviews.md)
 👉 **Decide:** none. Approve if stopping a server ~5 s after its root is deleted, and gracefully after 30 min idle (restarted on the next request or edit), is the fix you want, released as fleet-lsp 0.5.5.
-📍 fleet-lsp · reviewed, nothing built · next: worktree from origin/main, land this plan, then one relais run. Panel: backend (opus-5-5), lang:rust (opus-5-5), codex (gpt).
+📍 fleet-lsp · shipped in v0.5.5 (#22, #23), live-checked · next: none. Panel: backend (opus-5-5), lang:rust (opus-5-5), codex (gpt).
 **Changed by review:** an idle-stopped root restarts on `didOpen`/`didChange` (not `didClose`), its marker survives the old child's reap; a real shutdown handshake (`exit` after the `shutdown` reply, stdin kept open until then, bounded); `Starting` gets an init deadline; `try_exists` keeps a server on a stat error.
 **Verdicts:** backend approve-with-changes twice then approve; lang:rust approve-with-changes; codex approve-with-changes (3 high, applied). 4 carried into implementation: the `didClose` check runs on a separate root B; README notes that an init timeout counts toward `MAX_DEATHS`, never reset; the relais contract builds from Design (the full `Phase::Closing { why, shutdown_id, stage, deadline }`, `idle_stopped`, init deadline, stdin rule, fake server's delayed/omitted reply), not the shorter Changes list; and its acceptance adds the handshake, missing-reply, init-deadline and overlapping-generation tests.
 
@@ -76,7 +76,7 @@ Input → expected → actual. Each new integration test was run alone (`cargo t
 - Init deadline: first start that never initializes → request refused `not ready`, retired at the deadline, one answer per request → pass (29 s); same after a request-triggered idle restart → pass (33 s); after a `didChange`-triggered one → pass (49 s, load 14, after fb76e3d raised its ceiling to 10 s).
 - Overlapping generations → older slot's late retirement keeps the newer idle marker → pass (6 s).
 - `make check` → green → green: 133 unit and 59 integration tests, fmt, clippy `-D warnings`, `check-no-deps`, MSRV (load 15 → 63).
-- Live check after `brew upgrade`: runs after the release, not before this push.
+- Live check after `brew upgrade` to 0.5.5: a session started with `fleet-lsp serve rust` from `~/Developer/Perso` hovered over `src/main.rs` in a throwaway worktree of fleet-lsp, which started a rust-analyzer rooted there (pid 17250). `git worktree remove` then deleted the worktree. Expected: the server gone within 10 s with no further request. Actual: gone 4.6 s after the removal, and fleet-lsp kept running. `worktree-sweep --lsp` then found one orphan, whose `fleet-lsp serve` had started at 10:50, before the upgrade, with the old binary. The sweep stopped it, so nothing is left.
 
 ## Decision log
 
