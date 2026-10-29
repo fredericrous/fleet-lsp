@@ -14,6 +14,7 @@ FAKE_CONFIG_FIRST send workspace/configuration and wait for its reply
 FAKE_STOP_READING stop reading stdin after `initialized`
 FAKE_SLOW_READ    read stdin at this many bytes per second
 FAKE_FLOOD_MIB    after `initialized`, send this many MiB of diagnostics
+                  (event `flooding` when it starts)
 FAKE_FLOOD_FRAME  size of each diagnostics frame in bytes (default 1 MiB)
 FAKE_EXIT_AFTER   exit on its own this many seconds after `initialized`
 FAKE_FLAVOR=ra    behave like rust-analyzer instead: readiness is
@@ -102,6 +103,7 @@ class Reader:
 
 
 def flood():
+    event("flooding")
     total = int(float(os.environ["FAKE_FLOOD_MIB"]) * (1 << 20))
     size = int(os.environ.get("FAKE_FLOOD_FRAME", 1 << 20))
     sent = 0

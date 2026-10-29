@@ -644,6 +644,10 @@ fn a_client_that_stops_reading_is_torn_down_after_30s() {
         fx.dir.display()
     ));
     s.send(r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#);
+    // The 30 s count starts when the flood fills the client's pipe, not at
+    // `initialize`: start the clock there, so a slow start on a loaded
+    // machine (resolving the project, spawning the fake) is not counted.
+    assert!(wait_for(&fx, "flooding", Duration::from_secs(60)));
     let t0 = Instant::now();
     let code = s.wait_exit(Duration::from_secs(50));
     assert_eq!(code, Some(1));
