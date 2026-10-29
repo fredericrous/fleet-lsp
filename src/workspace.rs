@@ -1192,8 +1192,14 @@ impl Workspace {
         let mut notes = Vec::new();
         let views: Vec<SlotView> = self
             .slots
-            .iter()
+            .iter_mut()
             .map(|(id, s)| {
+                let quiet = s.core.is_quiet();
+                if !quiet {
+                    // A request held or in flight is use: idle time runs from
+                    // the moment the slot went quiet.
+                    s.last_used = now;
+                }
                 let served = self.serving.get(&s.root) == Some(id);
                 let root_exists = if check && served {
                     match s.root.try_exists() {
@@ -1218,7 +1224,7 @@ impl Workspace {
                         Phase::Live => PhaseView::Live,
                         Phase::Closing { .. } => PhaseView::Closing,
                     },
-                    quiet: s.core.is_quiet(),
+                    quiet,
                 }
             })
             .collect();
