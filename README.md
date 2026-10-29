@@ -89,7 +89,8 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   documents, starts it again with its open documents replayed; a
   `didClose` alone does not. Idle time counts only while the machine is
   awake (`Instant` stops during macOS sleep). A server that does not answer
-  `initialize` within the ceiling (`FLEET_LSP_CEILING_MS`) is retired, and
+  `initialize` within twice the ceiling (`FLEET_LSP_CEILING_MS`) plus 10
+  seconds is retired, and
   that counts toward the three-death limit, which is never reset.
 - `workspaceSymbol` (which names no file) searches the repository of the
   file opened or used most recently, and `references` stay inside

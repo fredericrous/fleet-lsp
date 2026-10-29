@@ -2167,15 +2167,25 @@ fn workspace_a_child_that_never_initializes_is_retired_after_the_ceiling() {
     let _light = light();
     let ws = Workspace::new("init-request");
     let a = ws.python("a", &[("FAKE_NEVER_INIT", "1")]);
-    // Generous: a fresh fake script can be slow to exec on a loaded machine.
-    let mut s = ws.start(&[("FLEET_LSP_CEILING_MS", "6000")], "python");
+    // The init deadline is twice the ceiling plus 10 s: 14 s here.
+    let mut s = ws.start(&[("FLEET_LSP_CEILING_MS", "2000")], "python");
     for round in 1..=2u32 {
         s.definition(round, &a.join("x.py"));
-        let failed = s.answer(round, Duration::from_secs(30));
-        assert!(failed.contains("initialization timed out"), "{failed}");
-        if let Some(pid) = pids(&a.join("events.log")).last() {
-            assert!(gone_within(*pid, Duration::from_secs(10)));
+        // The request's own ceiling answers it first; the start is retired
+        // later, at its own deadline.
+        let failed = s.answer(round, Duration::from_secs(40));
+        assert!(failed.contains("server not ready after 2s"), "{failed}");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while session_log(&ws, "python")
+            .matches("initialization timeout")
+            .count()
+            < round as usize
+        {
+            assert!(Instant::now() < deadline, "no initialization timeout");
+            thread::sleep(Duration::from_millis(100));
         }
+        let pid = *pids(&a.join("events.log")).last().unwrap();
+        assert!(gone_within(pid, Duration::from_secs(10)));
     }
     s.drain(Duration::from_millis(500));
     for round in 1..=2u32 {
@@ -2195,7 +2205,9 @@ fn workspace_a_child_restarted_by_an_edit_that_never_initializes_is_retired() {
     let mut s = ws.start(
         &[
             ("FLEET_LSP_IDLE_SECONDS", "1"),
-            ("FLEET_LSP_CEILING_MS", "10000"),
+            // The init deadline is twice the ceiling plus 10 s: 20 s here,
+            // room for the first child to start on a loaded machine.
+            ("FLEET_LSP_CEILING_MS", "5000"),
         ],
         "python",
     );
@@ -2211,7 +2223,7 @@ fn workspace_a_child_restarted_by_an_edit_that_never_initializes_is_retired() {
         Duration::from_secs(10)
     ));
     let pid = *pids(&a.join("events.log")).last().unwrap();
-    assert!(gone_within(pid, Duration::from_secs(20)));
+    assert!(gone_within(pid, Duration::from_secs(35)));
     assert!(ws.log_has(
         &ws.dir,
         "python",

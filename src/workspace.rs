@@ -38,6 +38,13 @@ const MAX_DEATHS: u32 = 3;
 /// How long the client's `shutdown` waits for every child's reply, and a
 /// child that fleet-lsp closes itself waits for its `shutdown` reply.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
+/// How long a child may take to answer `initialize`. It must outlast the
+/// request ceiling, so a request held for a slow start is answered by its
+/// own readiness refusal, and a start that is merely slow on a loaded
+/// machine is not retired as a death.
+fn init_deadline(ceiling: Duration) -> Duration {
+    ceiling * 2 + Duration::from_secs(10)
+}
 /// How often the served roots are looked for on disk.
 const ROOT_CHECK_EVERY: Duration = Duration::from_secs(5);
 /// Idle seconds before a quiet child is stopped, when
@@ -848,7 +855,7 @@ impl Workspace {
                 phase: Phase::Starting {
                     init: init_id,
                     waiting: Vec::new(),
-                    deadline: Instant::now() + self.settings.ceiling,
+                    deadline: Instant::now() + init_deadline(self.settings.ceiling),
                 },
                 stdout_closed: false,
                 stdin_broken: false,
@@ -1282,7 +1289,7 @@ impl Workspace {
         };
         self.log.line(&format!(
             "{repo} (slot {slot}): initialization timeout after {}s",
-            self.settings.ceiling.as_secs()
+            init_deadline(self.settings.ceiling).as_secs()
         ));
         self.count_death(slot);
         self.retire(slot, "initialization timed out");
@@ -1665,6 +1672,13 @@ mod tests {
         assert!(!may_sweep(true, false));
         assert!(!may_sweep(false, true));
         assert!(!may_sweep(true, true));
+    }
+
+    #[test]
+    fn a_start_outlasts_the_request_ceiling() {
+        for ceiling in [Duration::from_millis(1500), Duration::from_secs(370)] {
+            assert!(init_deadline(ceiling) > ceiling + Duration::from_secs(5));
+        }
     }
 
     #[test]
