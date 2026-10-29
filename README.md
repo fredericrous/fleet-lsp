@@ -79,6 +79,19 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   the whole session back, launch Claude Code with
   `export FLEET_LSP_MODE=single` (the session log header then has no
   `workspace mode`).
+- A server whose project root was deleted from disk is stopped within about
+  5 seconds, with no request needed (the session log says `its project root
+  no longer exists`); a stat error keeps the server. A server with no
+  request for `FLEET_LSP_IDLE_SECONDS` (default 1800, `0` turns it off) and
+  nothing in flight is shut down with the LSP handshake (`shutdown`, then
+  `exit`; killed if it does not answer in 10 seconds), which is not counted
+  as a crash. The next request, or a `didOpen` or `didChange` of one of its
+  documents, starts it again with its open documents replayed; a
+  `didClose` alone does not. Idle time counts only while the machine is
+  awake (`Instant` stops during macOS sleep). A server that does not answer
+  `initialize` within twice the ceiling (`FLEET_LSP_CEILING_MS`) plus 10
+  seconds is retired, and
+  that counts toward the three-death limit, which is never reset.
 - `workspaceSymbol` (which names no file) searches the repository of the
   file opened or used most recently, and `references` stay inside
   one repository: answers are never merged across servers.

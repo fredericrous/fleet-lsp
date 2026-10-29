@@ -261,9 +261,16 @@ impl Core {
         self.filter = filter;
     }
 
-    /// Workspace mode, when the shell ends a slot itself (an eviction that
-    /// stopped, a refused `initialize`): every request still held or in
-    /// flight is failed with `msg`. A slot whose child died has none left.
+    /// Nothing is held, in flight or waiting on a configuration reply: the
+    /// child owes the client nothing, so stopping it fails no request.
+    pub(crate) fn is_quiet(&self) -> bool {
+        self.held.is_empty() && self.inflight.is_empty() && self.config_requests.is_empty()
+    }
+
+    /// Workspace mode, when the shell ends a slot itself (an eviction or an
+    /// idle stop that ended, a refused `initialize`): every request still
+    /// held or in flight is failed with `msg`. A slot whose child died has
+    /// none left.
     pub(crate) fn fail_all(&mut self, msg: &str) -> Vec<Action> {
         let mut out = Vec::new();
         self.fail_everything(msg, &mut out);
@@ -794,6 +801,19 @@ mod tests {
     const REQ1: &str = r#"{"jsonrpc":"2.0","id":1,"method":"textDocument/references"}"#;
     const REQ2: &str = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover"}"#;
     const CHANGE: &str = r#"{"jsonrpc":"2.0","method":"textDocument/didChange"}"#;
+
+    #[test]
+    fn a_core_is_quiet_only_with_nothing_held_or_in_flight() {
+        let mut c = Core::new(cfg(Barrier::RustAnalyzer));
+        let t = Instant::now();
+        assert!(c.is_quiet(), "new");
+        c.step(client(REQ1), t);
+        assert!(!c.is_quiet(), "a request held behind the barrier");
+        c.step(quiescent(), t);
+        assert!(!c.is_quiet(), "the request is in flight at the server");
+        c.step(Input::ServerResponse(Id::Int(1)), t);
+        assert!(c.is_quiet(), "answered");
+    }
 
     #[test]
     fn held_until_quiescent_and_order_kept() {

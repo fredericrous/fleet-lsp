@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- A server whose project root was deleted is stopped within about 5
+  seconds, without waiting for a request.
+- A server idle for `FLEET_LSP_IDLE_SECONDS` (default 1800, `0` = off) is
+  shut down gracefully (`shutdown` then `exit`, bounded) and started again,
+  with its open documents replayed, on the next request or `didOpen` /
+  `didChange`. An idle stop is not a crash.
+- A server that does not answer `initialize` within the ceiling is retired
+  and counts as one death.
+- An eviction now waits for the `shutdown` reply before sending `exit`.
+
 ## v0.5.4
 
 - A file under a project root deleted from disk gets the `project root …
