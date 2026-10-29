@@ -1179,7 +1179,8 @@ impl Workspace {
         }
     }
 
-    /// Stops the children whose root left the disk and those left idle: the
+    /// Refreshes `last_used` on a slot that holds or forwards a request, then
+    /// stops the children whose root left the disk and those left idle: the
     /// facts are gathered here, the decision is `sweep`'s.
     fn sweep_slots(&mut self, now: Instant) {
         if !may_sweep(self.shutdown.is_some(), self.shutdown_seen) {
