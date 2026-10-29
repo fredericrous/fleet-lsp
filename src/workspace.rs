@@ -161,10 +161,14 @@ pub(crate) fn max_children_from_env() -> (usize, Option<String>) {
 /// `FLEET_LSP_IDLE_SECONDS`, validated: the idle time, and a note for the
 /// log when the value was not usable. Zero is valid and means never.
 pub(crate) fn idle_from_env() -> (Duration, Option<String>) {
+    parse_idle(std::env::var("FLEET_LSP_IDLE_SECONDS").ok().as_deref())
+}
+
+fn parse_idle(value: Option<&str>) -> (Duration, Option<String>) {
     let default = Duration::from_secs(DEFAULT_IDLE_SECONDS);
-    match std::env::var("FLEET_LSP_IDLE_SECONDS") {
-        Err(_) => (default, None),
-        Ok(v) => match v.trim().parse::<u64>() {
+    match value {
+        None => (default, None),
+        Some(v) => match v.trim().parse::<u64>() {
             Ok(seconds) => (Duration::from_secs(seconds), None),
             Err(_) => (
                 default,
@@ -478,7 +482,11 @@ impl Workspace {
             && self.shutdown.is_none()
             && !self.shutdown_seen
         {
-            let _ = self.slot_for(&root); // slot_for logs and clears the marker; the store holds the document
+            // slot_for clears the marker either way; its refusal is logged here.
+            if let Err(text) = self.slot_for(&root) {
+                self.log
+                    .line(&format!("{method}: no restart after idle stop: {text}"));
+            }
         }
         if let Some(slot) = self
             .serving
@@ -1683,14 +1691,10 @@ mod tests {
 
     #[test]
     fn the_idle_setting_keeps_its_default_for_a_bad_value() {
-        // Env is process-wide: this is the only test that touches it.
-        std::env::set_var("FLEET_LSP_IDLE_SECONDS", "soon");
-        let (idle, note) = idle_from_env();
+        let (idle, note) = parse_idle(Some("soon"));
         assert_eq!(idle, Duration::from_secs(DEFAULT_IDLE_SECONDS));
         assert!(note.is_some_and(|n| n.contains("FLEET_LSP_IDLE_SECONDS")));
-        std::env::set_var("FLEET_LSP_IDLE_SECONDS", "0");
-        assert_eq!(idle_from_env(), (Duration::ZERO, None));
-        std::env::remove_var("FLEET_LSP_IDLE_SECONDS");
-        assert_eq!(idle_from_env().0, Duration::from_secs(1800));
+        assert_eq!(parse_idle(Some("0")), (Duration::ZERO, None));
+        assert_eq!(parse_idle(None).0, Duration::from_secs(1800));
     }
 }

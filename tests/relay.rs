@@ -1991,39 +1991,38 @@ fn open_and_ask(s: &mut Session, file: &Path, id: u32) {
 fn workspace_a_gone_root_is_stopped_without_a_request() {
     let _light = light();
     let ws = Workspace::new("stop-gone");
-    let a = ws.python("a", &[]);
+    let mut a = ws.python("a", &[]);
     let real = fs::canonicalize(&a).unwrap();
     let mut s = ws.start(&[], "python");
-    s.definition(1, &a.join("x.py"));
-    assert!(answered_by(&s.answer(1, ANSWER), &a));
-    let pid = pids(&a.join("events.log"))[0];
-    fs::remove_dir_all(&a).unwrap();
-    assert!(
-        gone_within(pid, Duration::from_secs(10)),
-        "the child outlived its root"
-    );
-    assert!(
-        ws.log_has(
-            &ws.dir,
-            "python",
-            "its project root no longer exists",
-            Duration::from_secs(5)
-        ),
-        "{}",
-        session_log(&ws, "python")
-    );
-    let log = session_log(&ws, "python");
-    assert!(
-        log.lines()
-            .any(|l| l.contains("retired") && l.contains("its project root no longer exists")),
-        "{log}"
-    );
-    s.definition(2, &a.join("x.py"));
-    let refused = s.answer(2, ANSWER);
-    assert!(names_gone_root(&refused, &a, &real), "{refused}");
-    let a = ws.python("a", &[]);
-    s.definition(3, &a.join("x.py"));
-    let back = s.answer(3, ANSWER);
+    // MAX_DEATHS (3) stops in a row: were one counted as a death, the root
+    // would be refused by the last request.
+    for round in 0..3u32 {
+        let id = round * 2 + 1;
+        s.definition(id, &a.join("x.py"));
+        assert!(answered_by(&s.answer(id, ANSWER), &a));
+        let pid = pids(&a.join("events.log"))[0];
+        fs::remove_dir_all(&a).unwrap();
+        assert!(
+            gone_within(pid, Duration::from_secs(10)),
+            "the child outlived its root (round {round})"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session_log(&ws, "python")
+            .lines()
+            .filter(|l| l.contains("retired") && l.contains("its project root no longer exists"))
+            .count()
+            <= round as usize
+        {
+            assert!(Instant::now() < deadline, "{}", session_log(&ws, "python"));
+            thread::sleep(Duration::from_millis(50));
+        }
+        s.definition(id + 1, &a.join("x.py"));
+        let refused = s.answer(id + 1, ANSWER);
+        assert!(names_gone_root(&refused, &a, &real), "{refused}");
+        a = ws.python("a", &[]);
+    }
+    s.definition(7, &a.join("x.py"));
+    let back = s.answer(7, ANSWER);
     assert!(answered_by(&back, &a), "{back}");
     assert_eq!(count_kind(&a, "root"), 1);
 }
@@ -2194,6 +2193,45 @@ fn workspace_a_child_that_never_initializes_is_retired_after_the_ceiling() {
     }
     let log = session_log(&ws, "python");
     assert_eq!(log.matches("initialization timeout").count(), 2, "{log}");
+}
+
+#[test]
+fn workspace_a_child_restarted_by_a_request_that_never_initializes_is_retired() {
+    let _light = light();
+    let ws = Workspace::new("init-idle-request");
+    let a = ws.python("a", &[]);
+    let file = a.join("x.py");
+    let mut s = ws.start(
+        &[
+            ("FLEET_LSP_IDLE_SECONDS", "1"),
+            // The init deadline is twice the ceiling plus 10 s: 30 s here.
+            ("FLEET_LSP_CEILING_MS", "10000"),
+        ],
+        "python",
+    );
+    open_and_ask(&mut s, &file, 1);
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(ws.log_has(&ws.dir, "python", "retired", Duration::from_secs(10)));
+    fake_env(&a, &[("FAKE_NEVER_INIT", "1")]);
+    s.definition(2, &file);
+    let failed = s.answer(2, Duration::from_secs(40));
+    assert!(failed.contains("server not ready after 10s"), "{failed}");
+    assert!(wait_for_count(
+        &a,
+        "never-answering-initialize",
+        1,
+        Duration::from_secs(10)
+    ));
+    let pid = *pids(&a.join("events.log")).last().unwrap();
+    assert!(gone_within(pid, Duration::from_secs(45)));
+    assert!(ws.log_has(
+        &ws.dir,
+        "python",
+        "initialization timeout",
+        Duration::from_secs(10)
+    ));
+    s.drain(Duration::from_millis(500));
+    assert_eq!(s.frames_with(r#""id":2,"#), 1, "one failure per request");
 }
 
 #[test]
