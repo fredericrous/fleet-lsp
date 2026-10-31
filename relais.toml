@@ -37,7 +37,30 @@ aval = "required"
 amont = "optional"
 amont_agent = "optional"
 
-# Makefile: target check
-[[verification.profiles.default.commands]]
-argv = ["make", "check"]
+# `make check`'s gates, one check each, without `make msrv`: CI's msrv job
+# proves the declared floor on every pull request, and a whole second build
+# on the floor toolchain per candidate and per uncached base was the
+# laptop's heaviest repeat (relais#363 did the same for relais; decisions
+# docs/plans/2026-11-01-one-verdict-build.md, phase P1).
+[[verification.profiles.default.setup]]
+argv = ["make", "toolchain"]
 timeout_seconds = 300
+
+[[verification.profiles.default.commands]]
+argv = ["make", "deps"]
+timeout_seconds = 300
+
+[[verification.profiles.default.commands]]
+argv = ["make", "lint"]
+timeout_seconds = 300
+
+[[verification.profiles.default.commands]]
+argv = ["make", "test"]
+timeout_seconds = 300
+
+# Cache an all-green base by tree, profile and toolchain (SPEC §18): every
+# command here is local and deterministic (no fetch, no install, no clock),
+# and a red base is never cached (decisions
+# docs/plans/2026-11-01-one-verdict-build.md, phase P1).
+[verification.profiles.default]
+cache_baseline = true
