@@ -114,6 +114,9 @@ Docs: https://github.com/fredericrous/fleet-lsp
 /// Parses argv without the program name.
 pub(crate) fn parse(args: &[String]) -> Result<Command, Usage> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if asks_for_help(&args) {
+        return Ok(Command::Help);
+    }
     match args.as_slice() {
         [] => Err(Usage("missing command".into())),
         ["-h" | "--help"] | ["help"] => Ok(Command::Help),
@@ -122,6 +125,24 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, Usage> {
         ["serve", rest @ ..] => parse_serve(rest),
         [other, ..] => Err(Usage(format!("unknown command `{other}`"))),
     }
+}
+
+/// True when `-h` or `--help` is an option anywhere in argv, so help wins
+/// over an unknown flag. `--` ends options, and the value of `--min-version`
+/// is not an option.
+fn asks_for_help(args: &[&str]) -> bool {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--" => return false,
+            "-h" | "--help" => return true,
+            "--min-version" => {
+                it.next();
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn parse_doctor(rest: &[&str]) -> Result<Command, Usage> {
@@ -259,6 +280,17 @@ mod tests {
         assert!(p(&["serve", "cobol"]).is_err());
         assert!(p(&["serve", "rust", "extra"]).is_err());
         assert!(p(&["frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn help_wins_over_unknown_flags() {
+        assert_eq!(p(&["--bogus", "--help"]), Ok(Command::Help));
+        assert_eq!(p(&["--help", "--bogus"]), Ok(Command::Help));
+        assert_eq!(p(&["doctor", "--bogus", "-h"]), Ok(Command::Help));
+        assert_eq!(p(&["serve", "--bogus", "--help"]), Ok(Command::Help));
+        assert!(p(&["--bogus-flag-for-probe"]).is_err());
+        assert!(p(&["doctor", "--bogus"]).is_err());
+        assert!(p(&["doctor", "--", "--help"]).is_ok_and(|c| c != Command::Help));
     }
 
     #[test]
