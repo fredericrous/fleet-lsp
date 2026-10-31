@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `fleet-lsp --bogus --help` (an unknown flag beside `-h` or `--help`, at the
+  top level or after a command) prints the help and exits 0
+  (cli.help.help-and-version). An unknown flag alone still exits 2, and
+  `--help` after `--` is an operand, not a request for help.
+
 ## v0.5.6
 
 - A request held or in flight counts as use, so a slot is no longer

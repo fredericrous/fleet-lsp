@@ -1,0 +1,5 @@
+# The command lines `adr-lint cli-probe` checks at pre-push
+# (cli.help.help-and-version, and the exit-2 clause of cli.basics.exit-status).
+[[cli.programs]]
+build = ["cargo", "build", "-q", "--bin", "fleet-lsp"]
+run = ["target/debug/fleet-lsp"]
