@@ -63,7 +63,7 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 
 ## Phases
 
-- [ ] Phase 0 — extend the probe harness before production code: add separate initialize-only, didOpen-without-query, and query-triggered scenarios, plus explicit textDocument/diagnostic requests and diagnostic collection that does not end on a successful references response. Record which scenario first triggers Loading, correlate diagnostics with the requested URI, and require an explicit diagnostic report to establish an empty result. Run the extended `scripts/lsp-probe.py` on customer-vision with a planted `Date.now()` in `app/lib/crm/domain.ts` (reverted after) must show whether a `globalDate` diagnostic is pushed for the opened file, and that `worker/gtm-writeback.test.ts` gets none, pushed or pulled; records whether `Loading` starts at spawn or on `didOpen`, and its rounds. Its answer picks Behaviour 3's gate trigger and Behaviour 4's push-or-pull branch.
+- [x] Phase 0 — extend the probe harness before production code: add separate initialize-only, didOpen-without-query, and query-triggered scenarios, plus explicit textDocument/diagnostic requests and diagnostic collection that does not end on a successful references response. Record which scenario first triggers Loading, correlate diagnostics with the requested URI, and require an explicit diagnostic report to establish an empty result. Run the extended `scripts/lsp-probe.py` on customer-vision with a planted `Date.now()` in `app/lib/crm/domain.ts` (reverted after) must show whether a `globalDate` diagnostic is pushed for the opened file, and that `worker/gtm-writeback.test.ts` gets none, pushed or pulled; records whether `Loading` starts at spawn or on `didOpen`, and its rounds. Its answer picks Behaviour 3's gate trigger and Behaviour 4's push-or-pull branch.
 - [ ] Phase 1 — `lockfile_version` scoped names, the effect-tsgo selection path, the platform-package check, `Barrier::Tsgo`, the pull bridge if Phase 0 needs it, doctor strings; unit tests.
 - [ ] Phase 2 — integration test, docs, CHANGELOG, plugin min-version; release 0.6.0; install it here (rollback: reinstall 0.5.6 through brew; no state to migrate); verify in Claude Code on customer-vision.
 
@@ -83,5 +83,18 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 - 2026-11-03 — The person chose fleet-lsp running effect-tsgo where a repository pins `@effect/tsgo`, over fixing the 91 test findings or leaving the editor a superset of CI.
 
 ## Outcome
+
+**Phase 0 (observed 2026-11-03, effect-tsgo 0.64.1 on customer-vision, `scripts/lsp-probe.py` extended with `--scenario`, `--pull`, `--diag-cap`, `--open-also`):**
+
+| scenario | `Loading` progress | pushed | pulled (`textDocument/diagnostic`) |
+|---|---|---|---|
+| A: initialize only, 8 s | none | — | — |
+| B: open `domain.ts` (planted `Date.now()`) and `worker/gtm-writeback.test.ts` | begin 0.38 s after `didOpen`, end 0.13 s later | only `tsconfig.json`, 0 diagnostics | — |
+| C: as B, client advertises pull, pull 3 s after open | as B | as B | `domain.ts`: `full`, 1 (`377066`, globalDate); test file: `full`, 0 |
+| D: as C without advertising pull | as B | as B | same as C |
+
+- **Loading starts on `didOpen`**, not at spawn: the gate opens on `initialized` (Behaviour 3's fallback); `Loading` is one round per project.
+- **Diagnostics are pull-only**: effect-tsgo pushes nothing for opened files, advertised or not, and answers pulls with the plugin's rules and `overrides` applied. Behaviour 4's pull bridge is built.
+
 
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,lang:rust,unix,tui,codex body-sha=3c689ace007f -->
