@@ -47,10 +47,19 @@ pub(crate) struct Config {
     /// The project the child serves; if it is deleted under a running
     /// child, no server message can say anything useful about it.
     pub(crate) project_root: Option<std::path::PathBuf>,
-    /// The server pushes no diagnostics for opened files and answers
+    /// How the client gets diagnostics from this server.
+    pub(crate) diagnostics: Diagnostics,
+}
+
+/// How a server's diagnostics reach the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Diagnostics {
+    /// The server publishes them; fleet-lsp relays what it sends.
+    Pushed,
+    /// The server pushes none for opened files and answers
     /// `textDocument/diagnostic` (effect-tsgo): each document it is told
     /// about is pulled, and each answer published to the client.
-    pub(crate) pull_diagnostics: bool,
+    Pulled,
 }
 
 /// What a child's exit or hang ends.
@@ -148,7 +157,7 @@ pub(crate) struct Core {
     pulls: Pulls,
 }
 
-/// The pull bridge (`Config::pull_diagnostics`). A pull answers for one
+/// The pull bridge (`Diagnostics::Pulled`). A pull answers for one
 /// document *lifetime* (an open until its close) and one *generation*: the
 /// count of changes, to it or to any other open document of the server
 /// (`interFileDependencies`), that its diagnostics depend on. One pull per
@@ -222,9 +231,11 @@ impl Core {
             Input::ServerRequest { id, method, body } => {
                 self.server_request(id, &method, body.as_deref(), &mut out)
             }
-            Input::ServerSignal(sig) => self.gate_signal(&sig, &mut out),
-            Input::ServerOversize(scan) => self.server_oversize(&scan, now, &mut out),
-            Input::PullReply { id, body } => self.pull_done(&id, Some(&body), now, &mut out),
+            Input::ServerSignal(sig) => out.extend(self.gate_signal(&sig)),
+            Input::ServerOversize(scan) => out.extend(self.server_oversize(&scan, now)),
+            Input::PullReply { id, body } => {
+                out.extend(self.pull_done(&id, PullEnd::Answered(&body), now));
+            }
             Input::ChildExited(how) => self.child_exited(&how, &mut out),
             Input::ChildHung => {
                 let msg = format!(
@@ -273,13 +284,13 @@ impl Core {
                 }
                 "$/cancelRequest" => self.cancel(body, out),
                 "initialized" => {
-                    if self.cfg.barrier == Barrier::Tsgo && self.cfg.refusal.is_none() {
+                    if self.gate.opens_on_initialized() && self.cfg.refusal.is_none() {
                         // What the gate waits on, so never held behind a request.
                         out.push(Action::ToChild(body));
                     } else {
                         self.notification(body, out);
                     }
-                    self.gate_signal(&Signal::Initialized, out);
+                    out.extend(self.gate_signal(&Signal::Initialized));
                 }
                 _ => self.notification(body, out),
             },
@@ -319,10 +330,13 @@ impl Core {
         self.filter = filter;
     }
 
-    /// Nothing is held, in flight or waiting on a configuration reply: the
-    /// child owes the client nothing, so stopping it fails no request.
+    /// Nothing is held, in flight, waiting on a configuration reply or
+    /// being pulled: the child owes nothing, so stopping it cuts nothing.
     pub(crate) fn is_quiet(&self) -> bool {
-        self.held.is_empty() && self.inflight.is_empty() && self.config_requests.is_empty()
+        self.held.is_empty()
+            && self.inflight.is_empty()
+            && self.config_requests.is_empty()
+            && self.pulls.pending.is_empty()
     }
 
     /// Workspace mode, when the shell ends a slot itself (an eviction or an
@@ -353,7 +367,7 @@ impl Core {
     /// pulled, as in single-root mode.
     pub(crate) fn started(&mut self, sent: Vec<Vec<u8>>, now: Instant) -> Vec<Action> {
         let mut out: Vec<Action> = sent.into_iter().map(Action::ToChild).collect();
-        self.gate_signal(&Signal::Initialized, &mut out);
+        out.extend(self.gate_signal(&Signal::Initialized));
         self.bridge(out, now)
     }
 
@@ -586,15 +600,13 @@ impl Core {
         if removed {
             self.flush_front(out);
         }
-        self.expire_pulls(now, out);
+        out.extend(self.expire_pulls(now));
     }
-
-    // ---------------------------------------------------------------- pulls
 
     /// `out` with a diagnostic pull after each `didOpen`/`didChange` it
     /// sends the child, and an empty set published for each `didClose`.
     fn bridge(&mut self, out: Vec<Action>, now: Instant) -> Vec<Action> {
-        if !self.cfg.pull_diagnostics {
+        if self.cfg.diagnostics == Diagnostics::Pushed {
             return out;
         }
         let mut all = Vec::with_capacity(out.len());
@@ -604,16 +616,16 @@ impl Core {
                 _ => None,
             };
             all.push(action);
-            if let Some((method, uri)) = doc {
-                self.on_document(method, &uri, now, &mut all);
+            if let Some((event, uri)) = doc {
+                all.extend(self.on_document(event, &uri, now));
             }
         }
         all
     }
 
-    fn on_document(&mut self, method: &str, uri: &str, now: Instant, out: &mut Vec<Action>) {
-        match method {
-            "textDocument/didOpen" => {
+    fn on_document(&mut self, event: DocEvent, uri: &str, now: Instant) -> Vec<Action> {
+        match event {
+            DocEvent::Open => {
                 // A new lifetime: what a pull of an earlier one answers is stale.
                 let lifetime = self.pulls.next_lifetime;
                 self.pulls.next_lifetime += 1;
@@ -625,9 +637,9 @@ impl Core {
                         running: None,
                     },
                 );
-                self.pull(uri, now, out);
+                self.pull(uri, now)
             }
-            "textDocument/didChange" => {
+            DocEvent::Change => {
                 // effect-tsgo declares `interFileDependencies`: an edit can
                 // change any open document's diagnostics.
                 let mut idle = Vec::new();
@@ -637,24 +649,23 @@ impl Core {
                         idle.push(u.clone());
                     }
                 }
-                for u in idle {
-                    self.pull(&u, now, out);
-                }
+                idle.iter().flat_map(|u| self.pull(u, now)).collect()
             }
-            _ => {
+            DocEvent::Close => {
                 self.pulls.open.remove(uri);
-                out.push(Action::ToClient(publish(uri, Json::Arr(Vec::new()))));
+                vec![Action::ToClient(publish(uri, Json::Arr(Vec::new())))]
             }
         }
     }
 
-    /// One pull of `uri`'s current lifetime and generation.
-    fn pull(&mut self, uri: &str, now: Instant, out: &mut Vec<Action>) {
+    /// One pull of `uri`'s current lifetime and generation, unless pulls
+    /// have stopped or `uri` is not open.
+    fn pull(&mut self, uri: &str, now: Instant) -> Vec<Action> {
         if self.pulls.stopped || self.shutdown_seen || self.exit_seen {
-            return;
+            return Vec::new();
         }
         let Some(doc) = self.pulls.open.get_mut(uri) else {
-            return;
+            return Vec::new();
         };
         let id = Id::Str(format!("{PULL_PREFIX}{}", self.pulls.next_id));
         self.pulls.next_id += 1;
@@ -678,16 +689,15 @@ impl Core {
                 ),
             &id,
         );
-        out.push(Action::ToChild(msg.to_string().into_bytes()));
+        vec![Action::ToChild(msg.to_string().into_bytes())]
     }
 
-    /// A pull ended: answered (`body`), or failed without a report. Its
-    /// document is free for the next pull; an answer for the document's
-    /// current lifetime and generation is published, an obsolete one is
-    /// dropped and replaced.
-    fn pull_done(&mut self, id: &Id, body: Option<&[u8]>, now: Instant, out: &mut Vec<Action>) {
+    /// A pull ended. Its document is free for the next pull; an answer for
+    /// the document's current lifetime and generation is published, an
+    /// obsolete one is dropped and replaced.
+    fn pull_done(&mut self, id: &Id, end: PullEnd, now: Instant) -> Vec<Action> {
         let Some(pull) = self.pulls.pending.remove(id) else {
-            return;
+            return Vec::new();
         };
         let Some(doc) = self
             .pulls
@@ -695,47 +705,48 @@ impl Core {
             .get_mut(&pull.uri)
             .filter(|d| d.lifetime == pull.lifetime)
         else {
-            return;
+            return Vec::new();
         };
         if doc.running.as_ref() == Some(id) {
             doc.running = None;
         }
         if doc.generation != pull.generation {
-            self.pull(&pull.uri, now, out);
-            return;
+            return self.pull(&pull.uri, now);
         }
-        match body.map(diagnostic_report) {
-            Some(Some(Report::Full(items))) => {
-                out.push(Action::ToClient(publish(&pull.uri, items)));
-            }
+        let PullEnd::Answered(body) = end else {
+            return Vec::new();
+        };
+        match diagnostic_report(body) {
+            Report::Full(items) => vec![Action::ToClient(publish(&pull.uri, items))],
             // The client keeps the set it was last sent.
-            Some(Some(Report::Unchanged)) | None => {}
-            Some(None) => out.push(Action::Log(format!(
+            Report::Unchanged => Vec::new(),
+            Report::Error { code, message } => vec![Action::Log(format!(
+                "diagnostic pull of {} failed: {code} {message}",
+                pull.uri
+            ))],
+            Report::Unreadable => vec![Action::Log(format!(
                 "diagnostic pull of {} got no report",
                 pull.uri
-            ))),
+            ))],
         }
     }
 
     /// Pulls unanswered for the ceiling are given up (and cancelled at the
     /// server); a replacement coalesced behind one goes out now.
-    fn expire_pulls(&mut self, now: Instant, out: &mut Vec<Action>) {
+    fn expire_pulls(&mut self, now: Instant) -> Vec<Action> {
         let ceiling = self.cfg.ceiling;
-        let mut late: Vec<Id> = self
+        let mut late: Vec<(Id, String)> = self
             .pulls
             .pending
             .iter()
             .filter(|(_, p)| now.saturating_duration_since(p.sent) >= ceiling)
-            .map(|(id, _)| id.clone())
+            .map(|(id, p)| (id.clone(), p.uri.clone()))
             .collect();
-        late.sort_by_key(Id::to_json);
-        for id in late {
-            let Some(pull) = self.pulls.pending.get(&id) else {
-                continue;
-            };
+        late.sort_by_key(|(id, _)| id.to_json());
+        let mut out = Vec::new();
+        for (id, uri) in late {
             out.push(Action::Log(format!(
-                "diagnostic pull of {} unanswered after {}s; dropped",
-                pull.uri,
+                "diagnostic pull of {uri} unanswered after {}s; dropped",
                 ceiling.as_secs()
             )));
             let cancel = Json::obj()
@@ -743,16 +754,19 @@ impl Core {
                 .set("method", "$/cancelRequest")
                 .set("params", crate::route::with_id(Json::obj(), &id));
             out.push(Action::ToChild(cancel.to_string().into_bytes()));
-            self.pull_done(&id, None, now, out);
+            out.extend(self.pull_done(&id, PullEnd::Abandoned, now));
         }
+        out
     }
 
     // ---------------------------------------------------------------- server
 
-    fn gate_signal(&mut self, signal: &Signal, out: &mut Vec<Action>) {
+    fn gate_signal(&mut self, signal: &Signal) -> Vec<Action> {
+        let mut out = Vec::new();
         for effect in self.gate.on(signal) {
-            self.gate_effect(effect, out);
+            self.gate_effect(effect, &mut out);
         }
+        out
     }
 
     fn gate_effect(&mut self, effect: Effect, out: &mut Vec<Action>) {
@@ -806,16 +820,16 @@ impl Core {
         }
     }
 
-    fn server_oversize(&mut self, scan: &Scan, now: Instant, out: &mut Vec<Action>) {
+    fn server_oversize(&mut self, scan: &Scan, now: Instant) -> Vec<Action> {
         let msg = format!(
             "fleet-lsp: server frame over {} MiB dropped",
             crate::frame::MAX_FRAME >> 20
         );
-        out.push(Action::Log(msg.clone()));
+        let mut out = vec![Action::Log(msg.clone())];
         if let Some(id) = scan.id.as_ref().filter(|id| is_pull_id(id)) {
             // fleet-lsp's own pull: nobody to answer; the document is freed.
-            self.pull_done(id, None, now, out);
-            return;
+            out.extend(self.pull_done(id, PullEnd::Abandoned, now));
+            return out;
         }
         match scan.kind() {
             Kind::Response => {
@@ -835,6 +849,7 @@ impl Core {
             ))),
             _ => {}
         }
+        out
     }
 
     fn child_exited(&mut self, how: &str, out: &mut Vec<Action>) {
@@ -886,30 +901,68 @@ impl Pulls {
     }
 }
 
-/// What a `textDocument/diagnostic` answer reported.
+/// How a diagnostic pull ended.
+#[derive(Debug, Clone, Copy)]
+enum PullEnd<'a> {
+    /// The server's reply, as it came.
+    Answered(&'a [u8]),
+    /// Given up: unanswered for the ceiling, or its reply too large to read.
+    Abandoned,
+}
+
+/// What a document notification sent to the child does to the bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocEvent {
+    Open,
+    Change,
+    Close,
+}
+
+/// What a `textDocument/diagnostic` reply said.
 #[derive(Debug, PartialEq)]
 enum Report {
     /// `kind: "full"`: its `items`.
     Full(Json),
     /// `kind: "unchanged"`.
     Unchanged,
+    /// An error reply: its code and message.
+    Error { code: String, message: String },
+    /// Neither a report nor an error.
+    Unreadable,
 }
 
-fn diagnostic_report(body: &[u8]) -> Option<Report> {
-    let msg = json::parse(std::str::from_utf8(body).ok()?).ok()?;
-    let result = msg.get("result")?;
-    match result.get("kind")?.as_str()? {
-        "full" => match result.get("items")? {
-            items @ Json::Arr(_) => Some(Report::Full(items.clone())),
-            _ => None,
+fn diagnostic_report(body: &[u8]) -> Report {
+    let Some(msg) = std::str::from_utf8(body)
+        .ok()
+        .and_then(|t| json::parse(t).ok())
+    else {
+        return Report::Unreadable;
+    };
+    if let Some(e) = msg.get("error") {
+        return Report::Error {
+            code: e.get("code").map_or_else(|| "?".into(), Json::to_string),
+            message: e
+                .get("message")
+                .and_then(Json::as_str)
+                .unwrap_or("no message")
+                .to_string(),
+        };
+    }
+    let Some(report) = msg.get("result") else {
+        return Report::Unreadable;
+    };
+    match report.get("kind").and_then(Json::as_str) {
+        Some("full") => match report.get("items") {
+            Some(items @ Json::Arr(_)) => Report::Full(items.clone()),
+            _ => Report::Unreadable,
         },
-        "unchanged" => Some(Report::Unchanged),
-        _ => None,
+        Some("unchanged") => Report::Unchanged,
+        _ => Report::Unreadable,
     }
 }
 
 /// `textDocument/publishDiagnostics` of `items` for `uri`.
-fn publish(uri: &str, items: Json) -> Vec<u8> {
+pub(crate) fn publish(uri: &str, items: Json) -> Vec<u8> {
     Json::obj()
         .set("jsonrpc", "2.0")
         .set("method", "textDocument/publishDiagnostics")
@@ -921,17 +974,17 @@ fn publish(uri: &str, items: Json) -> Vec<u8> {
         .into_bytes()
 }
 
-/// The method and document of a `didOpen`, `didChange` or `didClose`.
-fn document_event(body: &[u8]) -> Option<(&'static str, String)> {
-    let method = match scan(body).method.as_deref()? {
-        "textDocument/didOpen" => "textDocument/didOpen",
-        "textDocument/didChange" => "textDocument/didChange",
-        "textDocument/didClose" => "textDocument/didClose",
+/// The event and document of a `didOpen`, `didChange` or `didClose`.
+fn document_event(body: &[u8]) -> Option<(DocEvent, String)> {
+    let event = match scan(body).method.as_deref()? {
+        "textDocument/didOpen" => DocEvent::Open,
+        "textDocument/didChange" => DocEvent::Change,
+        "textDocument/didClose" => DocEvent::Close,
         _ => return None,
     };
     let msg = json::parse(std::str::from_utf8(body).ok()?).ok()?;
     let uri = crate::route::document_uri(&msg)?.to_string();
-    Some((method, uri))
+    Some((event, uri))
 }
 
 /// The client's `initialize`, rewritten for the child: rust-analyzer's
@@ -1071,7 +1124,7 @@ mod tests {
             guard_pyright_log_level: false,
             scope: ChildScope::Session,
             project_root: None,
-            pull_diagnostics: false,
+            diagnostics: Diagnostics::Pushed,
         }
     }
 
@@ -1514,12 +1567,10 @@ mod tests {
         assert!(out[0].starts_with("client ") && out[0].contains(r#""id":12"#));
     }
 
-    // ------------------------------------------------------------ pull bridge
-
     fn tsgo() -> Core {
         let mut cf = cfg(Barrier::Tsgo);
         cf.lang = "typescript";
-        cf.pull_diagnostics = true;
+        cf.diagnostics = Diagnostics::Pulled;
         Core::new(cf)
     }
 
@@ -1682,7 +1733,7 @@ mod tests {
     #[test]
     fn a_pull_pending_when_a_slot_dies_is_dropped_with_its_replacement() {
         let mut cf = cfg(Barrier::Tsgo);
-        cf.pull_diagnostics = true;
+        cf.diagnostics = Diagnostics::Pulled;
         cf.scope = ChildScope::Slot;
         let mut c = Core::new(cf);
         let t = Instant::now();
@@ -1864,7 +1915,7 @@ mod tests {
     #[test]
     fn a_slot_start_sends_initialized_replay_then_what_waited_and_pulls_once() {
         let mut cf = cfg(Barrier::Tsgo);
-        cf.pull_diagnostics = true;
+        cf.diagnostics = Diagnostics::Pulled;
         cf.scope = ChildScope::Slot;
         let mut c = Core::new(cf);
         let t = Instant::now();
@@ -1896,5 +1947,42 @@ mod tests {
         assert_eq!(sent[6], format!("child {REQ1}"), "released by initialized");
         assert_eq!(sent.len(), 7, "{sent:?}");
         assert_eq!(pulls(&out).len(), 2, "one pull per replayed document");
+    }
+
+    /// FALSIFY: drop the `Report::Error` arm's log.
+    #[test]
+    fn a_pull_answered_with_an_error_logs_its_code_message_and_uri() {
+        let mut c = tsgo();
+        let t = Instant::now();
+        let a1 = opened(&mut c, &["file:///a.ts"], t)[0].0.clone();
+        let out = c.step(
+            Input::PullReply {
+                id: a1.clone(),
+                body: format!(
+                    r#"{{"jsonrpc":"2.0","id":{},"error":{{"code":-32802,"message":"server cancelled"}}}}"#,
+                    a1.to_json()
+                )
+                .into_bytes(),
+            },
+            t,
+        );
+        assert!(
+            out.contains(&Action::Log(
+                "diagnostic pull of file:///a.ts failed: -32802 server cancelled".into()
+            )),
+            "{out:?}"
+        );
+        assert!(published(&out).is_empty() && pulls(&out).is_empty());
+    }
+
+    /// FALSIFY: leave pending pulls out of `is_quiet`.
+    #[test]
+    fn a_pending_pull_keeps_the_core_from_being_quiet() {
+        let mut c = tsgo();
+        let t = Instant::now();
+        let a1 = opened(&mut c, &["file:///a.ts"], t)[0].0.clone();
+        assert!(!c.is_quiet(), "an idle stop would cut the pull");
+        c.step(full(&a1, "done"), t);
+        assert!(c.is_quiet());
     }
 }

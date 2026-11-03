@@ -25,7 +25,10 @@ FAKE_FLAVOR=tsgo  behave like effect-tsgo 0.64.1 instead: no readiness
                   line, a `Loading` progress after the first `didOpen`, no
                   pushed diagnostics, and `textDocument/diagnostic` answered
                   with one diagnostic naming the document and the cwd
-                  (event `pull <uri>`)
+                  (event `pull <uri>`); an `initialized` without object
+                  params is refused (event `invalid-initialized`) and every
+                  later message is answered ServerNotInitialized (event
+                  `not-initialized <method>`), as the real server does
 FAKE_IGNORE_SHUTDOWN  never answer `shutdown`
 FAKE_IGNORE_EXIT  stay up after `exit` and after EOF
 FAKE_CRASH_AT_START  exit 4 on `initialize`, before answering it
@@ -166,6 +169,7 @@ def main():
     r = Reader(float(rate) if rate else None)
     shutdown = False
     loaded = False
+    initialized = not TSGO
     config_id = 900
     while True:
         m = r.message()
@@ -196,7 +200,12 @@ def main():
                                               "workspaceDiagnostics": False}
             send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": caps}})
         elif method == "initialized" and TSGO:
-            pass
+            # Real effect-tsgo: "error handling method 'initialized':
+            # InvalidParams", and every later request ServerNotInitialized.
+            if isinstance(m.get("params"), (dict, list)):
+                initialized = True
+            else:
+                event("invalid-initialized")
         elif method == "initialized":
             if os.environ.get("FAKE_EXIT_AFTER"):
                 t = float(os.environ["FAKE_EXIT_AFTER"])
@@ -218,6 +227,11 @@ def main():
             if not os.environ.get("FAKE_NEVER_READY"):
                 threading.Thread(target=become_ready,
                                  args=(float(os.environ.get("FAKE_READY_DELAY", "0")),), daemon=True).start()
+        elif TSGO and not initialized and method not in ("shutdown", "exit"):
+            event("not-initialized", str(method))
+            if mid is not None:
+                send({"jsonrpc": "2.0", "id": mid, "error": {
+                    "code": -32002, "message": "ServerNotInitialized"}})
         elif method == "textDocument/didOpen":
             doc = (m.get("params") or {}).get("textDocument") or {}
             event("open", f"{doc.get('uri')} {doc.get('version')}")

@@ -2356,8 +2356,6 @@ fn workspace_an_older_slots_late_retirement_keeps_the_newer_idle_marker() {
     );
 }
 
-// ----------------------------------------------- effect-tsgo
-
 /// Node's `<platform>-<arch>` here, as `@effect/tsgo`'s platform packages
 /// are named.
 fn node_platform() -> String {
@@ -2451,7 +2449,7 @@ fn legacy_ts_repo(dir: &Path) {
 impl Fixture {
     fn effect(name: &str) -> Fixture {
         let dir = std::env::temp_dir().join(format!("fleet-lsp-it-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir); // a leftover of an earlier run, or none
         effect_repo(&dir);
         fake_node(&dir);
         Fixture { dir }
@@ -2499,6 +2497,12 @@ fn effect_tsgo_answers_once_initialized_and_publishes_pulled_diagnostics() {
         "{published}"
     );
     assert_eq!(count_kind(&fx.dir, "pull"), 1, "{:?}", fx.event_lines());
+    assert_eq!(
+        count_kind(&fx.dir, "not-initialized"),
+        0,
+        "{:?}",
+        fx.event_lines()
+    );
     // An edit is pulled and published again.
     s.change(&file, 2);
     assert!(wait_for_count(&fx.dir, "pull", 2, ANSWER));
@@ -2577,6 +2581,8 @@ fn workspace_effect_tsgo_pulls_on_start_and_on_restart_beside_a_legacy_repositor
     assert_eq!(count(&a, "recv initialized "), 2, "{:?}", events(&a));
     assert_eq!(count(&a, &format!("open {} 1", uri(&fa))), 2);
     assert_eq!(count_kind(&a, "pull"), 2, "one pull per start");
+    assert_eq!(count_kind(&a, "invalid-initialized"), 0, "{:?}", events(&a));
+    assert_eq!(count_kind(&a, "not-initialized"), 0, "{:?}", events(&a));
     assert_eq!(count(&b, "textDocument/diagnostic"), 0, "{:?}", events(&b));
     assert_eq!(count_kind(&b, "open"), 1, "{:?}", events(&b));
     assert_eq!(s.frames_with(&uri(&fb)), 0, "nothing published for b");
@@ -2587,4 +2593,38 @@ fn workspace_effect_tsgo_pulls_on_start_and_on_restart_beside_a_legacy_repositor
         0,
         "no own id reaches the client"
     );
+}
+
+/// FALSIFY: drop the shell's empty publish for a `didClose` with no live slot.
+#[test]
+fn workspace_a_close_after_an_idle_stop_clears_the_pulled_diagnostics() {
+    let _light = light();
+    let ws = Workspace::new("tsgo-idle-close");
+    let a = ws.effect("effect");
+    fake_node(&ws.dir);
+    let path = fake_path(&ws.dir);
+    let mut s = ws.start(
+        &[("PATH", path.as_str()), ("FLEET_LSP_IDLE_SECONDS", "2")],
+        "typescript",
+    );
+    let fa = a.join("x.ts");
+    s.open(&fa, "typescript");
+    s.definition(1, &fa);
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    s.frame_with(&[PUBLISH, &uri(&fa), "fake diagnostic"], ANSWER);
+    let pid = pids(&a.join("events.log"))[0];
+    assert!(wait_for_count(&a, "exit", 1, Duration::from_secs(20)));
+    assert!(gone_within(pid, Duration::from_secs(10)));
+    s.close(&fa);
+    let cleared = s.frame_with(&[PUBLISH, r#""diagnostics":[]"#], ANSWER);
+    assert!(cleared.contains(&uri(&fa)), "{cleared}");
+    s.drain(Duration::from_millis(500));
+    let n = s
+        .seen
+        .borrow()
+        .iter()
+        .filter(|b| b.contains(PUBLISH) && b.contains(r#""diagnostics":[]"#))
+        .count();
+    assert_eq!(n, 1, "one empty set: {:?}", s.seen.borrow());
+    assert_eq!(count_kind(&a, "root"), 1, "a close starts no server");
 }

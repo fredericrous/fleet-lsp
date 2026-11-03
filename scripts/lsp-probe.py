@@ -8,7 +8,7 @@ Records, with timestamps relative to process start:
 
 Writes a JSONL transcript and prints a JSON summary.
 """
-import argparse, json, os, queue, subprocess, sys, threading, time
+import argparse, json, os, queue, signal, subprocess, sys, threading, time
 from pathlib import Path
 
 def frame(obj):
@@ -43,9 +43,9 @@ def main():
     ap.add_argument("--root", required=True)
     ap.add_argument("--file", required=True)
     ap.add_argument("--lang", required=True)
-    ap.add_argument("--line", type=int, required=True, help="0-based")
-    ap.add_argument("--char", type=int, required=True, help="0-based")
-    ap.add_argument("--expect", required=True, help="substring a correct answer's uris contain")
+    ap.add_argument("--line", type=int, help="0-based; required by --scenario query")
+    ap.add_argument("--char", type=int, help="0-based; required by --scenario query")
+    ap.add_argument("--expect", help="substring a correct answer's uris contain; required by --scenario query")
     ap.add_argument("--open-delay", type=float, default=0.0)
     ap.add_argument("--config-delay", type=float, default=0.0)
     ap.add_argument("--init-options", default="null")
@@ -70,6 +70,10 @@ def main():
     ap.add_argument("--diag-cap", action="store_true",
                     help="advertise textDocument.diagnostic (pull) support")
     a = ap.parse_args()
+    if a.scenario == "query":
+        missing = [f"--{n}" for n in ("line", "char", "expect") if getattr(a, n) is None]
+        if missing:
+            ap.error(f"--scenario query needs {', '.join(missing)}")
 
     env = dict(os.environ)
     for k in a.unset_env:
@@ -78,8 +82,10 @@ def main():
         k, v = kv.split("=", 1); env[k] = v
     t0 = time.monotonic()
     rel = lambda: round(time.monotonic() - t0, 3)
+    # Its own session, so the probe's teardown reaches every process it started.
     p = subprocess.Popen(json.loads(a.cmd), cwd=a.cwd, env=env, stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=open(a.out + ".stderr", "wb"))
+                         stdout=subprocess.PIPE, stderr=open(a.out + ".stderr", "wb"),
+                         start_new_session=True)
     q = queue.Queue()
     threading.Thread(target=reader, args=(p.stdout, q), daemon=True).start()
     out = open(a.out, "w")
@@ -239,10 +245,17 @@ def main():
         except subprocess.TimeoutExpired:
             summary["exit_after_eof_s"] = "still alive after 10s"
     if p.poll() is None:
-        p.kill(); p.wait()
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # exited between the poll and the kill
+        p.wait()
     # compress polls: keep first 5, last 3
     if len(summary["polls"]) > 8:
         summary["polls"] = summary["polls"][:5] + [["…", len(summary["polls"]) - 8]] + summary["polls"][-3:]
     print(json.dumps(summary, indent=1))
+    # A server that died, or a query run that never got its answer, fails.
+    if "died_at" in summary or (a.scenario == "query" and not state["ready"]):
+        sys.exit(1)
 
 main()

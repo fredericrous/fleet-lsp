@@ -126,6 +126,13 @@ fn render_text(found: &[Resolution], git: &Path, claude: Option<&str>) -> String
                 "readiness barrier not measured for this version: an empty answer right after start is not evidence",
             );
         }
+        if let Some(why) = &r.unchecked {
+            field(
+                &mut out,
+                "note",
+                &format!("compiler identity was not checked: {why}"),
+            );
+        }
         if let Verdict::Refused { reason, fix } = &r.verdict {
             field(&mut out, "reason", reason);
             match fix {
@@ -254,8 +261,9 @@ mod tests {
             spawn: None,
             barrier: crate::gate::Barrier::None,
             narrowed,
+            unchecked: None,
             tsserver_path: None,
-            pull_diagnostics: true,
+            diagnostics: crate::core::Diagnostics::Pulled,
         }
     }
 
@@ -287,6 +295,14 @@ mod tests {
         assert!(
             narrowed.contains("\n  note: readiness barrier not measured"),
             "{narrowed}"
+        );
+        let unknown = "effect-tsgo 0.64.1 (typescript unknown, node 24.14.0)";
+        let mut r = effect_tsgo(Verdict::Verified, true, unknown);
+        r.unchecked = Some("its bundled compilers are unreadable in @effect/tsgo 0.64.1".into());
+        let text = block(&[r]);
+        assert!(
+            text.contains("\n  note: compiler identity was not checked: its bundled compilers"),
+            "{text}"
         );
     }
 

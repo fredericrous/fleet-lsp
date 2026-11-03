@@ -45,6 +45,8 @@ pub(crate) const DEFAULT_CEILING: Duration = Duration::from_secs(370);
 /// What the plugin manifest sets as `requestTimeout`: the ceiling + 30 s.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(400);
 pub(crate) const TICK: Duration = Duration::from_millis(200);
+/// How long a server's process group has after SIGTERM before SIGKILL.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(crate) enum Ev {
@@ -122,6 +124,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
             .and_then(|r| r.spawn.clone())
             .expect("verified implies a spawn");
         let mut cmd = Command::new(&spawn.program);
+        own_group(&mut cmd);
         cmd.args(&spawn.args)
             .current_dir(&spawn.cwd)
             .stdin(Stdio::piped())
@@ -147,7 +150,10 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         log.line(&format!("refusing: {r}"));
     }
     let res_barrier = res.as_ref().map_or(Barrier::None, |r| r.barrier.clone());
-    let pull_diagnostics = refusal.is_none() && res.as_ref().is_some_and(|r| r.pull_diagnostics);
+    let diagnostics = match (&refusal, &res) {
+        (None, Some(r)) => r.diagnostics,
+        _ => core::Diagnostics::Pushed,
+    };
     let cfg = Config {
         lang: lang.name(),
         barrier: if refusal.is_some() {
@@ -162,7 +168,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         guard_pyright_log_level: lang == Lang::Python,
         scope: ChildScope::Session,
         project_root: res.as_ref().and_then(|r| r.project_root.clone()),
-        pull_diagnostics,
+        diagnostics,
     };
     Shell::new(cfg, child, client, log).run(first)
 }
@@ -252,6 +258,8 @@ impl Shell {
         if self.child_stdout_closed {
             if let Some(c) = &mut self.child {
                 if let Ok(Some(status)) = c.try_wait() {
+                    // What it started may outlive it (effect-tsgo's `tsc`).
+                    signal_group(c.id(), "TERM");
                     self.child = None;
                     self.step(Input::ChildExited(status.to_string()));
                 }
@@ -328,6 +336,7 @@ impl Shell {
                 match c.try_wait() {
                     Ok(Some(status)) => {
                         self.log.line(&format!("server exited: {status}"));
+                        signal_group(c.id(), "TERM");
                         break;
                     }
                     Ok(None) if Instant::now() < deadline => {
@@ -335,8 +344,7 @@ impl Shell {
                     }
                     _ => {
                         self.log.line("server did not exit; killed");
-                        let _ = c.kill();
-                        let _ = c.wait();
+                        stop_group(&mut c, STOP_GRACE);
                         break;
                     }
                 }
@@ -374,6 +382,51 @@ impl Shell {
             thread::spawn(move || child_reader(stdout, &q, &tx, &f));
         }
     }
+}
+
+/// A server is started in its own process group, so stopping it reaches
+/// what it started: effect-tsgo's Node wrapper runs a native `tsc`.
+pub(crate) fn own_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = cmd; // holds-until: fleet-lsp builds for unix only (`resolve::is_executable`).
+}
+
+/// Sends `signal` (`TERM`, `KILL`) to the process group led by `pid`,
+/// through `kill(1)`: the crate forbids `unsafe` and links nothing. A group
+/// already empty is not an error.
+pub(crate) fn signal_group(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    for kill in ["/bin/kill", "/usr/bin/kill"] {
+        if std::path::Path::new(kill).exists() {
+            let status = Command::new(kill)
+                .args([format!("-{signal}"), "--".into(), format!("-{pid}")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            drop(status); // ESRCH for an empty group is the expected case.
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (pid, signal); // holds-until: fleet-lsp builds for unix only.
+}
+
+/// Ends `child` and its process group: SIGTERM to the group, up to `grace`
+/// for the leader to exit, then SIGKILL to the group and the leader, reaped.
+pub(crate) fn stop_group(child: &mut Child, grace: Duration) {
+    signal_group(child.id(), "TERM");
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    signal_group(child.id(), "KILL");
+    let _ = child.kill(); // already gone after the group's SIGKILL: not an error.
+    let _ = child.wait(); // reaps; its status was logged by the caller.
 }
 
 /// The I/O threads report through `emit`, which returns false once nobody
@@ -468,7 +521,7 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
             Kind::Response => match s.id.clone() {
                 // fleet-lsp's own diagnostic pull: its answer is the core's.
                 Some(id) if core::is_pull_id(&id) => {
-                    let _ = tx.send(Ev::Input(Input::PullReply { id, body }));
+                    let _ = tx.send(Ev::Input(Input::PullReply { id, body })); // the loop is gone: teardown
                     continue;
                 }
                 Some(id) => {

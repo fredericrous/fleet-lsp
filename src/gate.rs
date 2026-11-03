@@ -100,6 +100,12 @@ impl Gate {
         &self.state
     }
 
+    /// Whether the relayed `initialized` is what opens this gate, so it
+    /// must never wait behind a held request.
+    pub(crate) fn opens_on_initialized(&self) -> bool {
+        self.barrier == Barrier::Tsgo
+    }
+
     pub(crate) fn on(&mut self, signal: &Signal) -> Vec<Effect> {
         let mut effects = Vec::new();
         let next = match (&self.barrier, signal) {
