@@ -2628,3 +2628,91 @@ fn workspace_a_close_after_an_idle_stop_clears_the_pulled_diagnostics() {
     assert_eq!(n, 1, "one empty set: {:?}", s.seen.borrow());
     assert_eq!(count_kind(&a, "root"), 1, "a close starts no server");
 }
+
+/// The pid of the grandchild `repo`'s fake started (`FAKE_GRANDCHILD`).
+fn grandchild(events_log: &Path, within: Duration) -> u32 {
+    let deadline = Instant::now() + within;
+    loop {
+        let found = fs::read_to_string(events_log)
+            .unwrap_or_default()
+            .lines()
+            .find_map(|l| {
+                l.split_once(" grandchild ")
+                    .map(|(_, p)| p.trim().parse().unwrap())
+            });
+        if let Some(pid) = found {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no grandchild in {}",
+            events_log.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `STOP_GRACE` (1 s) and room for a loaded machine to reap.
+const GROUP_GONE: Duration = Duration::from_secs(3);
+
+/// Kills a grandchild a failing test left behind.
+struct Reap(u32);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        let status = Command::new("kill")
+            .args(["-KILL", &self.0.to_string()])
+            .stderr(Stdio::null())
+            .status();
+        drop(status); // already gone when the test passed
+    }
+}
+
+/// FALSIFY: kill only the leader in `relay::stop_group`.
+#[test]
+fn a_server_ignoring_exit_is_killed_with_its_grandchild_at_teardown() {
+    let _light = light();
+    let fx = Fixture::new("grandchild", true);
+    let mut s = Session::start(
+        &fx,
+        &[("FAKE_IGNORE_EXIT", "1"), ("FAKE_GRANDCHILD", "1")],
+        true,
+    );
+    s.initialize(&fx.dir);
+    let g = grandchild(&fx.events(), ANSWER);
+    let _reap = Reap(g);
+    assert!(alive(g));
+    s.send(SHUTDOWN);
+    s.answer(99, ANSWER);
+    s.send(EXIT);
+    // Teardown's 10 s for the server to leave, then the group kill.
+    assert_eq!(s.wait_exit(Duration::from_secs(25)), Some(0));
+    assert!(
+        gone_within(g, GROUP_GONE),
+        "grandchild {g} outlived teardown"
+    );
+}
+
+/// FALSIFY: kill only the leader when a workspace slot is retired.
+#[test]
+fn workspace_a_retired_server_takes_its_grandchild_with_it() {
+    let _light = light();
+    let ws = Workspace::new("grandchild-retire");
+    let a = ws.python("a", &[("FAKE_GRANDCHILD", "1")]);
+    let mut s = ws.start(&[], "python");
+    open_and_ask(&mut s, &a.join("x.py"), 1);
+    let log = a.join("events.log");
+    let g = grandchild(&log, ANSWER);
+    let _reap = Reap(g);
+    let fake = pids(&log)[0];
+    // Its root deleted: the slot is retired on the next root check.
+    fs::remove_dir_all(&a).unwrap();
+    assert!(
+        gone_within(fake, Duration::from_secs(20)),
+        "the server was not retired"
+    );
+    assert!(
+        gone_within(g, GROUP_GONE),
+        "grandchild {g} outlived the retire"
+    );
+}

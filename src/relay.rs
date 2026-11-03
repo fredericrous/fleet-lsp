@@ -259,7 +259,9 @@ impl Shell {
             if let Some(c) = &mut self.child {
                 if let Ok(Some(status)) = c.try_wait() {
                     // What it started may outlive it (effect-tsgo's `tsc`).
-                    signal_group(c.id(), "TERM");
+                    for e in end_group_after_exit(c.id()) {
+                        self.log.line(&e);
+                    }
                     self.child = None;
                     self.step(Input::ChildExited(status.to_string()));
                 }
@@ -336,7 +338,9 @@ impl Shell {
                 match c.try_wait() {
                     Ok(Some(status)) => {
                         self.log.line(&format!("server exited: {status}"));
-                        signal_group(c.id(), "TERM");
+                        for e in end_group_after_exit(c.id()) {
+                            self.log.line(&e);
+                        }
                         break;
                     }
                     Ok(None) if Instant::now() < deadline => {
@@ -344,7 +348,9 @@ impl Shell {
                     }
                     _ => {
                         self.log.line("server did not exit; killed");
-                        stop_group(&mut c, STOP_GRACE);
+                        for e in stop_group(&mut c, STOP_GRACE) {
+                            self.log.line(&e);
+                        }
                         break;
                     }
                 }
@@ -396,37 +402,115 @@ pub(crate) fn own_group(cmd: &mut Command) {
     let _ = cmd; // holds-until: fleet-lsp builds for unix only (`resolve::is_executable`).
 }
 
-/// Sends `signal` (`TERM`, `KILL`) to the process group led by `pid`,
-/// through `kill(1)`: the crate forbids `unsafe` and links nothing. A group
-/// already empty is not an error.
-pub(crate) fn signal_group(pid: u32, signal: &str) {
-    #[cfg(unix)]
-    for kill in ["/bin/kill", "/usr/bin/kill"] {
-        if std::path::Path::new(kill).exists() {
-            let status = Command::new(kill)
-                .args([format!("-{signal}"), "--".into(), format!("-{pid}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            drop(status); // ESRCH for an empty group is the expected case.
-            return;
+/// A signal fleet-lsp sends a server's process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupSignal {
+    Term,
+    Kill,
+}
+
+impl GroupSignal {
+    /// `kill(1)`'s spelling of it.
+    fn as_arg(self) -> &'static str {
+        match self {
+            GroupSignal::Term => "-TERM",
+            GroupSignal::Kill => "-KILL",
         }
     }
-    #[cfg(not(unix))]
-    let _ = (pid, signal); // holds-until: fleet-lsp builds for unix only.
+}
+
+/// Whether a signal found anyone in the group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reached {
+    Members,
+    /// `kill(1)` exited 1: the group is already empty.
+    Nobody,
+}
+
+/// Runs `kill(1)` with `signal` against the process group led by `pid`:
+/// the crate forbids `unsafe` and links nothing. The error names the pid,
+/// the signal and what failed, for the caller's log.
+fn kill_group(pid: u32, signal: &str) -> Result<Reached, String> {
+    let fail = |why: String| format!("signalling process group {pid} with {signal}: {why}");
+    let Some(kill) = ["/bin/kill", "/usr/bin/kill"]
+        .into_iter()
+        .find(|k| std::path::Path::new(k).exists())
+    else {
+        return Err(fail("no kill(1) at /bin/kill or /usr/bin/kill".into()));
+    };
+    let status = Command::new(kill)
+        .args([signal.to_string(), "--".into(), format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| fail(format!("could not run {kill}: {e}")))?;
+    match status.code() {
+        Some(0) => Ok(Reached::Members),
+        Some(1) => Ok(Reached::Nobody),
+        _ => Err(fail(format!("{kill} ended with {status}"))),
+    }
+}
+
+/// Sends `signal` to the process group led by `pid`.
+pub(crate) fn signal_group(pid: u32, signal: GroupSignal) -> Result<Reached, String> {
+    kill_group(pid, signal.as_arg())
+}
+
+/// Whether anyone is left in the process group led by `pid` (signal 0).
+fn group_alive(pid: u32) -> Result<bool, String> {
+    kill_group(pid, "-0").map(|r| r == Reached::Members)
+}
+
+/// After a server's leader exited on its own: what it started (effect-tsgo's
+/// native `tsc`) gets SIGTERM, then SIGKILL if anyone is left after
+/// `STOP_GRACE`. Returns what went wrong, for the log.
+// holds-until: called in the same synchronous step as the leader's reap,
+// so its pgid cannot have been reused by a new group in between.
+pub(crate) fn end_group_after_exit(pid: u32) -> Vec<String> {
+    let mut errors = Vec::new();
+    match signal_group(pid, GroupSignal::Term) {
+        Ok(Reached::Nobody) => return errors,
+        Ok(Reached::Members) => {}
+        Err(e) => errors.push(e),
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    loop {
+        match group_alive(pid) {
+            Ok(false) => return errors,
+            Ok(true) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(true) => break,
+            Err(e) => {
+                errors.push(e);
+                break;
+            }
+        }
+    }
+    if let Err(e) = signal_group(pid, GroupSignal::Kill) {
+        errors.push(e);
+    }
+    errors
 }
 
 /// Ends `child` and its process group: SIGTERM to the group, up to `grace`
 /// for the leader to exit, then SIGKILL to the group and the leader, reaped.
-pub(crate) fn stop_group(child: &mut Child, grace: Duration) {
-    signal_group(child.id(), "TERM");
+/// Returns what went wrong, for the log.
+pub(crate) fn stop_group(child: &mut Child, grace: Duration) -> Vec<String> {
+    let pid = child.id();
+    let mut errors = Vec::new();
+    if let Err(e) = signal_group(pid, GroupSignal::Term) {
+        errors.push(e);
+    }
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
         thread::sleep(Duration::from_millis(20));
     }
-    signal_group(child.id(), "KILL");
+    // The leader is not reaped yet, so the pgid is still this group's.
+    if let Err(e) = signal_group(pid, GroupSignal::Kill) {
+        errors.push(e);
+    }
     let _ = child.kill(); // already gone after the group's SIGKILL: not an error.
     let _ = child.wait(); // reaps; its status was logged by the caller.
+    errors
 }
 
 /// The I/O threads report through `emit`, which returns false once nobody

@@ -81,6 +81,9 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 
 ## Decision log
 
+- 2026-11-03 — Only a dependency of the root package selects the effect-tsgo path (pnpm root importer, npm `packages[""]`, the root `package.json` for yarn and bun); a member-only or transitive `@effect/tsgo` keeps typescript-language-server (code review).
+- 2026-11-03 — Workspace mode sent `initialized` without `params`; real effect-tsgo answered InvalidParams, then ServerNotInitialized, then crashed on the first pull. Found by the end-to-end run, not by the fake server; `initialized` now carries `params: {}` and the fake tsgo refuses it the same way.
+- 2026-11-03 — Each server runs in its own process group, signalled as a group at every kill site; a SIGKILL of fleet-lsp leaves no effect-tsgo process (it exits on end of input).
 - 2026-11-03 — The person chose fleet-lsp running effect-tsgo where a repository pins `@effect/tsgo`, over fixing the 91 test findings or leaving the editor a superset of CI.
 
 ## Outcome

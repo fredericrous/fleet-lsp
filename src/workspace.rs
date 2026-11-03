@@ -1139,12 +1139,24 @@ impl Workspace {
             sd.waiting.remove(&slot);
         }
         s.child_in.close();
-        // Its own grace, if any, was the stage deadline that led here.
-        relay::stop_group(&mut s.child, Duration::ZERO);
+        let exited = matches!(s.child.try_wait(), Ok(Some(_)));
+        let mut errors = Vec::new();
+        if !exited {
+            // Its own grace, if any, was the stage deadline that led here.
+            errors = relay::stop_group(&mut s.child, Duration::ZERO);
+        }
+        // Logged as soon as the leader is reaped: what it started is
+        // cleaned up after, with its own grace.
         self.log.line(&format!(
             "retired {} (slot {slot}): {why}; log {}",
             s.repo, s.log_path
         ));
+        if exited {
+            errors = relay::end_group_after_exit(s.child.id());
+        }
+        for e in errors {
+            self.log.line(&e);
+        }
         self.answer_shutdown_when_done(Instant::now());
     }
 
@@ -1392,14 +1404,18 @@ impl Workspace {
                     Ok(Some(status)) => {
                         exited.insert(*slot);
                         self.log.line(&format!("{} exited: {status}", s.repo));
-                        relay::signal_group(s.child.id(), "TERM");
+                        for e in relay::end_group_after_exit(s.child.id()) {
+                            self.log.line(&e);
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => {
                         exited.insert(*slot);
                         self.log
                             .line(&format!("{}: status unreadable: {e}; killed", s.repo));
-                        relay::stop_group(&mut s.child, Duration::ZERO);
+                        for e in relay::stop_group(&mut s.child, Duration::ZERO) {
+                            self.log.line(&e);
+                        }
                     }
                 }
             }
@@ -1413,7 +1429,9 @@ impl Workspace {
         for (slot, s) in &self.slots {
             if !exited.contains(slot) {
                 self.log.line(&format!("{} did not exit; killed", s.repo));
-                relay::signal_group(s.child.id(), "TERM");
+                if let Err(e) = relay::signal_group(s.child.id(), relay::GroupSignal::Term) {
+                    self.log.line(&e);
+                }
             }
         }
         let deadline = Instant::now() + STOP_GRACE;
@@ -1421,10 +1439,10 @@ impl Workspace {
             if exited.contains(slot) {
                 let _ = s.child.wait(); // exited: reaps it.
             } else {
-                relay::stop_group(
-                    &mut s.child,
-                    deadline.saturating_duration_since(Instant::now()),
-                );
+                let grace = deadline.saturating_duration_since(Instant::now());
+                for e in relay::stop_group(&mut s.child, grace) {
+                    self.log.line(&e);
+                }
             }
         }
         // Give our own last replies (a shutdown result, refusals) a moment.

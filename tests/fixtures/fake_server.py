@@ -31,6 +31,9 @@ FAKE_FLAVOR=tsgo  behave like effect-tsgo 0.64.1 instead: no readiness
                   `not-initialized <method>`), as the real server does
 FAKE_IGNORE_SHUTDOWN  never answer `shutdown`
 FAKE_IGNORE_EXIT  stay up after `exit` and after EOF
+FAKE_GRANDCHILD   on `initialized`, start `sleep 600` in the fake's own
+                  process group (event `grandchild <pid>`): what a group
+                  kill must reach, as effect-tsgo's native `tsc`
 FAKE_CRASH_AT_START  exit 4 on `initialize`, before answering it
 FAKE_NEVER_INIT   never answer `initialize` (and never read again)
 FAKE_SHUTDOWN_DELAY  seconds to wait before answering `shutdown`; input or
@@ -43,7 +46,7 @@ under one fleet-lsp. Every answer to a request carries `cwd`, so a test
 sees which fake answered. Events added for those tests: `root <rootUri>`,
 `init-params <params as sorted JSON>`, `open <uri> <version>`.
 """
-import json, os, select, sys, time, threading
+import json, os, select, subprocess, sys, time, threading
 
 if os.path.exists(".fake-env"):
     for line in open(".fake-env").read().splitlines():
@@ -207,6 +210,10 @@ def main():
             else:
                 event("invalid-initialized")
         elif method == "initialized":
+            if os.environ.get("FAKE_GRANDCHILD"):
+                g = subprocess.Popen(["sleep", "600"], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                event("grandchild", str(g.pid))
             if os.environ.get("FAKE_EXIT_AFTER"):
                 t = float(os.environ["FAKE_EXIT_AFTER"])
                 threading.Thread(target=lambda: (time.sleep(t), event("self-exit"), os._exit(3)), daemon=True).start()

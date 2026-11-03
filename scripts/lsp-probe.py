@@ -244,12 +244,12 @@ def main():
             p.wait(timeout=10); summary["exit_after_eof_s"] = round(time.monotonic() - te, 3)
         except subprocess.TimeoutExpired:
             summary["exit_after_eof_s"] = "still alive after 10s"
-    if p.poll() is None:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # exited between the poll and the kill
-        p.wait()
+    # Always: the wrapper may have exited and left what it started.
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # the group is already empty
+    p.wait()
     # compress polls: keep first 5, last 3
     if len(summary["polls"]) > 8:
         summary["polls"] = summary["polls"][:5] + [["…", len(summary["polls"]) - 8]] + summary["polls"][-3:]
