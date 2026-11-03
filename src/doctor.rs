@@ -126,6 +126,13 @@ fn render_text(found: &[Resolution], git: &Path, claude: Option<&str>) -> String
                 "readiness barrier not measured for this version: an empty answer right after start is not evidence",
             );
         }
+        if let Some(why) = &r.unchecked {
+            field(
+                &mut out,
+                "note",
+                &format!("compiler identity was not checked: {why}"),
+            );
+        }
         if let Verdict::Refused { reason, fix } = &r.verdict {
             field(&mut out, "reason", reason);
             match fix {
@@ -238,5 +245,106 @@ mod tests {
         field(&mut out, "reason", &"word ".repeat(40));
         assert!(out.lines().all(|l| l.chars().count() <= WIDTH), "{out}");
         assert!(out.lines().nth(1).unwrap().starts_with("          word"));
+    }
+
+    fn effect_tsgo(verdict: Verdict, narrowed: bool, version: &str) -> Resolution {
+        let root = std::path::PathBuf::from("/r/cv");
+        Resolution {
+            lang: Lang::TypeScript,
+            git_root: Some(root.clone()),
+            project_root: Some(root.clone()),
+            pin: Some("pnpm-lock.yaml @effect/tsgo 0.64.1".into()),
+            server: matches!(verdict, Verdict::Verified)
+                .then(|| root.join("node_modules/.bin/effect-tsgo")),
+            version: Some(version.into()),
+            verdict,
+            spawn: None,
+            barrier: crate::gate::Barrier::None,
+            narrowed,
+            unchecked: None,
+            tsserver_path: None,
+            diagnostics: crate::core::Diagnostics::Pulled,
+        }
+    }
+
+    /// The language block of `render_text`: what follows the repository
+    /// line, up to the log lines, which depend on the machine.
+    fn block(found: &[Resolution]) -> String {
+        let text = render_text(found, Path::new("/r/cv"), None);
+        assert!(text.lines().all(|l| l.chars().count() <= WIDTH), "{text}");
+        text.lines()
+            .skip(1)
+            .take_while(|l| !l.starts_with("log: "))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    }
+
+    /// FALSIFY: print the adapter's version layout for effect-tsgo.
+    #[test]
+    fn effect_tsgo_renders_its_compiler_pin_and_server() {
+        let v = "effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)";
+        assert_eq!(
+            block(&[effect_tsgo(Verdict::Verified, false, v)]),
+            "typescript verified effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)\n\
+             \x20 project: .\n\
+             \x20 pin: pnpm-lock.yaml @effect/tsgo 0.64.1\n\
+             \x20 server: node_modules/.bin/effect-tsgo\n"
+        );
+        let beta = "effect-tsgo 0.64.1 (typescript 7.1.0-beta, node 24.14.0)";
+        let narrowed = block(&[effect_tsgo(Verdict::Verified, true, beta)]);
+        assert!(
+            narrowed.contains("\n  note: readiness barrier not measured"),
+            "{narrowed}"
+        );
+        let unknown = "effect-tsgo 0.64.1 (typescript unknown, node 24.14.0)";
+        let mut r = effect_tsgo(Verdict::Verified, true, unknown);
+        r.unchecked = Some("its bundled compilers are unreadable in @effect/tsgo 0.64.1".into());
+        let text = block(&[r]);
+        assert!(
+            text.contains("\n  note: compiler identity was not checked: its bundled compilers"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn effect_tsgo_refusals_name_it_and_their_fix() {
+        let refused = |reason: &str, fix: Fix| {
+            block(&[effect_tsgo(
+                Verdict::Refused {
+                    reason: reason.into(),
+                    fix,
+                },
+                false,
+                "",
+            )])
+        };
+        let install = Fix::Command("pnpm install --frozen-lockfile".into());
+        assert_eq!(
+            refused("@effect/tsgo is not installed", install.clone()),
+            "typescript refused\n\
+             \x20 project: .\n\
+             \x20 pin: pnpm-lock.yaml @effect/tsgo 0.64.1\n\
+             \x20 reason: @effect/tsgo is not installed\n\
+             \x20 fix:\n\
+             \x20   pnpm install --frozen-lockfile\n"
+        );
+        let stale = refused(
+            "stale node_modules: @effect/tsgo 0.63.0, pinned 0.64.1",
+            install,
+        );
+        assert!(
+            stale.contains("  reason: stale node_modules: @effect/tsgo 0.63.0, pinned 0.64.1\n"),
+            "{stale}"
+        );
+        let node = refused(
+            "node is not on PATH; @effect/tsgo runs on it",
+            Fix::None("install Node".into()),
+        );
+        assert!(
+            node.ends_with(
+                "  reason: node is not on PATH; @effect/tsgo runs on it\n  fix: none — install Node\n"
+            ),
+            "{node}"
+        );
     }
 }

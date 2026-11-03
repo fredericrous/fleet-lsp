@@ -11,12 +11,14 @@
 //! a stderr reader that writes the child's own log.
 
 use crate::cli::Lang;
-use crate::core::{self, Action, ChildScope, Config, Core, Input, ServerFilter, REQUEST_FAILED};
+use crate::core::{
+    self, Action, ChildScope, Config, Core, Diagnostics, Input, ServerFilter, REQUEST_FAILED,
+};
 use crate::frame::{Frame, FrameReader};
 use crate::json::{self, Json};
 use crate::log::{tilde, Log};
 use crate::queue::{Queue, OWN, SERVER};
-use crate::relay::{self, Ev, HUNG, OWN_CAP, QUEUE_CAP, TEARDOWN, TICK};
+use crate::relay::{self, Ev, HUNG, OWN_CAP, QUEUE_CAP, STOP_GRACE, TEARDOWN, TICK};
 use crate::resolve::{self, Located, Resolution};
 use crate::route::{self, refusal, Applied, Documents, Recent};
 use crate::scan::{scan, Id, Kind};
@@ -503,7 +505,19 @@ impl Workspace {
         if let Some(slot) = live {
             let s = scan(&body);
             self.step_slot(slot, Input::Client { body, scan: s });
+        } else if method == "textDocument/didClose" && self.pulled(&root) {
+            // A live slot's Core clears what it published; with none, the
+            // set the bridge last published for it is cleared here.
+            self.send_to_client(core::publish(&uri, Json::Arr(Vec::new())));
         }
+    }
+
+    /// Whether `root` resolved to a server whose diagnostics fleet-lsp pulls.
+    fn pulled(&self, root: &Path) -> bool {
+        matches!(
+            self.roots.get(root),
+            Some(RootState::Resolved { res, .. }) if res.diagnostics == Diagnostics::Pulled
+        )
     }
 
     fn cancel(&mut self, body: Vec<u8>) {
@@ -804,6 +818,7 @@ impl Workspace {
         let log_path = tilde(child_log.path());
         self.last_log.insert(root.to_path_buf(), log_path.clone());
         let mut cmd = Command::new(&spawn.program);
+        relay::own_group(&mut cmd);
         cmd.args(&spawn.args)
             .current_dir(&spawn.cwd)
             .stdin(Stdio::piped())
@@ -834,6 +849,7 @@ impl Workspace {
             guard_pyright_log_level: lang == Lang::Python,
             scope: ChildScope::Slot,
             project_root: Some(root.to_path_buf()),
+            diagnostics: res.diagnostics,
         };
         let child_in = Arc::new(Queue::single(QUEUE_CAP));
         let filter = Arc::new(Mutex::new(ServerFilter::default()));
@@ -1023,19 +1039,23 @@ impl Workspace {
             .filter(|uri| self.root_of(uri).as_ref() == Ok(&root))
             .collect();
         let replay = self.documents.replay(|uri| mine.iter().any(|m| m == uri));
-        if let Some(s) = self.slots.get_mut(&slot) {
-            let waiting = match std::mem::replace(&mut s.phase, Phase::Live) {
-                Phase::Starting { waiting, .. } => waiting,
-                other => {
-                    s.phase = other;
-                    Vec::new()
-                }
-            };
-            s.outbox.push(notification("initialized"));
-            s.outbox
-                .extend(replay.iter().map(|m| m.to_string().into_bytes()));
-            s.outbox.extend(waiting);
-        }
+        let Some(s) = self.slots.get_mut(&slot) else {
+            return;
+        };
+        let waiting = match std::mem::replace(&mut s.phase, Phase::Live) {
+            Phase::Starting { waiting, .. } => waiting,
+            other => {
+                s.phase = other;
+                Vec::new()
+            }
+        };
+        // Through the slot's Core, so the gate hears `initialized` and each
+        // replayed document is pulled where the server needs it, once.
+        let mut sent = vec![initialized()];
+        sent.extend(replay.iter().map(|m| m.to_string().into_bytes()));
+        sent.extend(waiting);
+        let actions = s.core.started(sent, Instant::now());
+        self.apply(slot, actions);
     }
 
     fn step_slot(&mut self, slot: u64, input: Input) {
@@ -1119,12 +1139,24 @@ impl Workspace {
             sd.waiting.remove(&slot);
         }
         s.child_in.close();
-        let _ = s.child.kill();
-        let _ = s.child.wait();
+        let exited = matches!(s.child.try_wait(), Ok(Some(_)));
+        let mut errors = Vec::new();
+        if !exited {
+            // Its own grace, if any, was the stage deadline that led here.
+            errors = relay::stop_group(&mut s.child, Duration::ZERO);
+        }
+        // Logged as soon as the leader is reaped: what it started is
+        // cleaned up after, with its own grace.
         self.log.line(&format!(
             "retired {} (slot {slot}): {why}; log {}",
             s.repo, s.log_path
         ));
+        if exited {
+            errors = relay::end_group_after_exit(s.child.id());
+        }
+        for e in errors {
+            self.log.line(&e);
+        }
         self.answer_shutdown_when_done(Instant::now());
     }
 
@@ -1372,13 +1404,18 @@ impl Workspace {
                     Ok(Some(status)) => {
                         exited.insert(*slot);
                         self.log.line(&format!("{} exited: {status}", s.repo));
+                        for e in relay::end_group_after_exit(s.child.id()) {
+                            self.log.line(&e);
+                        }
                     }
                     Ok(None) => {}
                     Err(e) => {
                         exited.insert(*slot);
                         self.log
                             .line(&format!("{}: status unreadable: {e}; killed", s.repo));
-                        let _ = s.child.kill();
+                        for e in relay::stop_group(&mut s.child, Duration::ZERO) {
+                            self.log.line(&e);
+                        }
                     }
                 }
             }
@@ -1387,12 +1424,26 @@ impl Workspace {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        for (slot, s) in &mut self.slots {
+        // The ones left get SIGTERM to their group, one grace for all, then
+        // SIGKILL.
+        for (slot, s) in &self.slots {
             if !exited.contains(slot) {
                 self.log.line(&format!("{} did not exit; killed", s.repo));
-                let _ = s.child.kill();
+                if let Err(e) = relay::signal_group(s.child.id(), relay::GroupSignal::Term) {
+                    self.log.line(&e);
+                }
             }
-            let _ = s.child.wait();
+        }
+        let deadline = Instant::now() + STOP_GRACE;
+        for (slot, s) in &mut self.slots {
+            if exited.contains(slot) {
+                let _ = s.child.wait(); // exited: reaps it.
+            } else {
+                let grace = deadline.saturating_duration_since(Instant::now());
+                for e in relay::stop_group(&mut s.child, grace) {
+                    self.log.line(&e);
+                }
+            }
         }
         // Give our own last replies (a shutdown result, refusals) a moment.
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1487,6 +1538,18 @@ fn notification(method: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// `initialized`, with the empty object its params must be: effect-tsgo
+/// refuses one without params and then treats the session as never
+/// initialized.
+fn initialized() -> Vec<u8> {
+    Json::obj()
+        .set("jsonrpc", "2.0")
+        .set("method", "initialized")
+        .set("params", Json::obj())
+        .to_string()
+        .into_bytes()
+}
+
 fn parse(body: &[u8]) -> Option<Json> {
     json::parse(std::str::from_utf8(body).ok()?).ok()
 }
@@ -1559,6 +1622,12 @@ fn slot_reader(
                 }
             }
             Kind::Response => match s.id.clone() {
+                // A diagnostic pull's answer goes to the slot's Core, ahead
+                // of the lifecycle replies.
+                Some(id) if core::is_pull_id(&id) => {
+                    let body = forward.take().expect("set above");
+                    emit(SlotEvent::Input(Input::PullReply { id, body }));
+                }
                 Some(id) if route::is_own(&id) => {
                     let body = forward.take().expect("set above");
                     emit(SlotEvent::OwnReply(id, body));

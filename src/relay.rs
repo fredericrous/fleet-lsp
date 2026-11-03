@@ -18,7 +18,7 @@
 //! kills it, and returns — process exit ends any writer still blocked.
 
 use crate::cli::{Lang, Version};
-use crate::core::{Action, ChildScope, Config, Core, Input, ServerFilter};
+use crate::core::{self, Action, ChildScope, Config, Core, Input, ServerFilter};
 use crate::frame::{write_frame_reporting, Frame, FrameReader};
 use crate::gate::{Barrier, Signal};
 use crate::json::{self, Json};
@@ -45,6 +45,8 @@ pub(crate) const DEFAULT_CEILING: Duration = Duration::from_secs(370);
 /// What the plugin manifest sets as `requestTimeout`: the ceiling + 30 s.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(400);
 pub(crate) const TICK: Duration = Duration::from_millis(200);
+/// How long a server's process group has after SIGTERM before SIGKILL.
+pub(crate) const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub(crate) enum Ev {
@@ -122,6 +124,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
             .and_then(|r| r.spawn.clone())
             .expect("verified implies a spawn");
         let mut cmd = Command::new(&spawn.program);
+        own_group(&mut cmd);
         cmd.args(&spawn.args)
             .current_dir(&spawn.cwd)
             .stdin(Stdio::piped())
@@ -147,6 +150,10 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         log.line(&format!("refusing: {r}"));
     }
     let res_barrier = res.as_ref().map_or(Barrier::None, |r| r.barrier.clone());
+    let diagnostics = match (&refusal, &res) {
+        (None, Some(r)) => r.diagnostics,
+        _ => core::Diagnostics::Pushed,
+    };
     let cfg = Config {
         lang: lang.name(),
         barrier: if refusal.is_some() {
@@ -161,6 +168,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         guard_pyright_log_level: lang == Lang::Python,
         scope: ChildScope::Session,
         project_root: res.as_ref().and_then(|r| r.project_root.clone()),
+        diagnostics,
     };
     Shell::new(cfg, child, client, log).run(first)
 }
@@ -250,6 +258,10 @@ impl Shell {
         if self.child_stdout_closed {
             if let Some(c) = &mut self.child {
                 if let Ok(Some(status)) = c.try_wait() {
+                    // What it started may outlive it (effect-tsgo's `tsc`).
+                    for e in end_group_after_exit(c.id()) {
+                        self.log.line(&e);
+                    }
                     self.child = None;
                     self.step(Input::ChildExited(status.to_string()));
                 }
@@ -326,6 +338,9 @@ impl Shell {
                 match c.try_wait() {
                     Ok(Some(status)) => {
                         self.log.line(&format!("server exited: {status}"));
+                        for e in end_group_after_exit(c.id()) {
+                            self.log.line(&e);
+                        }
                         break;
                     }
                     Ok(None) if Instant::now() < deadline => {
@@ -333,8 +348,9 @@ impl Shell {
                     }
                     _ => {
                         self.log.line("server did not exit; killed");
-                        let _ = c.kill();
-                        let _ = c.wait();
+                        for e in stop_group(&mut c, STOP_GRACE) {
+                            self.log.line(&e);
+                        }
                         break;
                     }
                 }
@@ -372,6 +388,129 @@ impl Shell {
             thread::spawn(move || child_reader(stdout, &q, &tx, &f));
         }
     }
+}
+
+/// A server is started in its own process group, so stopping it reaches
+/// what it started: effect-tsgo's Node wrapper runs a native `tsc`.
+pub(crate) fn own_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = cmd; // holds-until: fleet-lsp builds for unix only (`resolve::is_executable`).
+}
+
+/// A signal fleet-lsp sends a server's process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GroupSignal {
+    Term,
+    Kill,
+}
+
+impl GroupSignal {
+    /// `kill(1)`'s spelling of it.
+    fn as_arg(self) -> &'static str {
+        match self {
+            GroupSignal::Term => "-TERM",
+            GroupSignal::Kill => "-KILL",
+        }
+    }
+}
+
+/// Whether a signal found anyone in the group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reached {
+    Members,
+    /// `kill(1)` exited 1: the group is already empty.
+    Nobody,
+}
+
+/// Runs `kill(1)` with `signal` against the process group led by `pid`:
+/// the crate forbids `unsafe` and links nothing. The error names the pid,
+/// the signal and what failed, for the caller's log.
+fn kill_group(pid: u32, signal: &str) -> Result<Reached, String> {
+    let fail = |why: String| format!("signalling process group {pid} with {signal}: {why}");
+    let Some(kill) = ["/bin/kill", "/usr/bin/kill"]
+        .into_iter()
+        .find(|k| std::path::Path::new(k).exists())
+    else {
+        return Err(fail("no kill(1) at /bin/kill or /usr/bin/kill".into()));
+    };
+    let status = Command::new(kill)
+        .args([signal.to_string(), "--".into(), format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| fail(format!("could not run {kill}: {e}")))?;
+    match status.code() {
+        Some(0) => Ok(Reached::Members),
+        Some(1) => Ok(Reached::Nobody),
+        _ => Err(fail(format!("{kill} ended with {status}"))),
+    }
+}
+
+/// Sends `signal` to the process group led by `pid`.
+pub(crate) fn signal_group(pid: u32, signal: GroupSignal) -> Result<Reached, String> {
+    kill_group(pid, signal.as_arg())
+}
+
+/// Whether anyone is left in the process group led by `pid` (signal 0).
+fn group_alive(pid: u32) -> Result<bool, String> {
+    kill_group(pid, "-0").map(|r| r == Reached::Members)
+}
+
+/// After a server's leader exited on its own: what it started (effect-tsgo's
+/// native `tsc`) gets SIGTERM, then SIGKILL if anyone is left after
+/// `STOP_GRACE`. Returns what went wrong, for the log.
+// holds-until: called in the same synchronous step as the leader's reap,
+// so its pgid cannot have been reused by a new group in between.
+pub(crate) fn end_group_after_exit(pid: u32) -> Vec<String> {
+    let mut errors = Vec::new();
+    match signal_group(pid, GroupSignal::Term) {
+        Ok(Reached::Nobody) => return errors,
+        Ok(Reached::Members) => {}
+        Err(e) => errors.push(e),
+    }
+    let deadline = Instant::now() + STOP_GRACE;
+    loop {
+        match group_alive(pid) {
+            Ok(false) => return errors,
+            Ok(true) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(true) => break,
+            Err(e) => {
+                errors.push(e);
+                break;
+            }
+        }
+    }
+    if let Err(e) = signal_group(pid, GroupSignal::Kill) {
+        errors.push(e);
+    }
+    errors
+}
+
+/// Ends `child` and its process group: SIGTERM to the group, up to `grace`
+/// for the leader to exit, then SIGKILL to the group and the leader, reaped.
+/// Returns what went wrong, for the log.
+pub(crate) fn stop_group(child: &mut Child, grace: Duration) -> Vec<String> {
+    let pid = child.id();
+    let mut errors = Vec::new();
+    if let Err(e) = signal_group(pid, GroupSignal::Term) {
+        errors.push(e);
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The leader is not reaped yet, so the pgid is still this group's.
+    if let Err(e) = signal_group(pid, GroupSignal::Kill) {
+        errors.push(e);
+    }
+    let _ = child.kill(); // already gone after the group's SIGKILL: not an error.
+    let _ = child.wait(); // reaps; its status was logged by the caller.
+    errors
 }
 
 /// The I/O threads report through `emit`, which returns false once nobody
@@ -463,11 +602,17 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
                 }));
                 forward = !(method == "window/workDoneProgress/create" && f.own_progress);
             }
-            Kind::Response => {
-                if let Some(id) = s.id.clone() {
+            Kind::Response => match s.id.clone() {
+                // fleet-lsp's own diagnostic pull: its answer is the core's.
+                Some(id) if core::is_pull_id(&id) => {
+                    let _ = tx.send(Ev::Input(Input::PullReply { id, body })); // the loop is gone: teardown
+                    continue;
+                }
+                Some(id) => {
                     let _ = tx.send(Ev::Input(Input::ServerResponse(id)));
                 }
-            }
+                None => {}
+            },
             Kind::Other => {}
         }
         if forward && out.push(SERVER, body).is_err() {

@@ -13,7 +13,7 @@ fleet-lsp sits between Claude Code and the server and makes two promises:
 - **Pinned.** The server that answers is verified against the repository's
   own pin (`rust-toolchain.toml`, the `pyright==` dev dependency and
   `uv.lock`, the `typescript` and `typescript-language-server` lockfile
-  entries, gopls's `tool` directive in `tools/go.mod` or `go.mod`). When it cannot be verified, every query gets an error naming
+  entries, or `@effect/tsgo` and its platform package where a project pins it, gopls's `tool` directive in `tools/go.mod` or `go.mod`). When it cannot be verified, every query gets an error naming
   the cause and the command that fixes it — never an answer from the wrong
   version.
 - **Ready.** A query is answered only after the server has finished loading,
@@ -25,6 +25,7 @@ fleet-lsp sits between Claude Code and the server and makes two promises:
 | Go | gopls from the repository's `tool` directive — the nearest `tools/go.mod` (run with `-modfile`) or the module's `go.mod` — built by the machine's Go under `GOTOOLCHAIN=local` | gopls blocks until its workspace is loaded |
 | Python | pyright from the repository's `.venv` | pyright's workspace-enumeration message (1.1.411) |
 | TypeScript | typescript-language-server from the repository's own `node_modules` (an exact devDependency), with the repository's TypeScript | the end of its "Initializing JS/TS language features" progress (6.0.1) |
+| TypeScript, where the lockfile pins `@effect/tsgo` | `effect-tsgo tsc --lsp --stdio` from the repository's own `node_modules`, with the compiler the wrapper selects (verified, shown by doctor); its diagnostics are pulled and published, since effect-tsgo serves them by pull only | `initialized` relayed: effect-tsgo loads its project on the first `didOpen`, and a request waits for that load (0.64.1 with TypeScript 7.0.2) |
 
 A server version whose barrier has not been measured gets a narrowed
 promise: answers flow, but an empty answer during the first start-up seconds
