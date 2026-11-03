@@ -88,6 +88,18 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 
 ## Outcome
 
+**Verification, observed on this branch (2026-11-03):**
+
+| entry | expected | actual |
+|---|---|---|
+| unit, resolve / doctor / gate | as listed above | pass: 165 unit tests, incl. every format for `@effect/tsgo`, the root-only pin, stale and missing packages and selectors, the narrowed promise, the doctor golden `typescript verified effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)` (every line ≤ 80 columns), `initialized` opening the gate |
+| integration | the tsgo fake answers once `initialized` is relayed and its pulled diagnostics are published; workspace pulls on start and restart beside a legacy repository; a close after an idle stop clears diagnostics; a grandchild dies at teardown and on retire | pass: 65 integration tests (`make check`), incl. those five |
+| real server through `fleet-lsp serve typescript` on customer-vision, planted `Date.now()` | `globalDate` published for `domain.ts`, nothing for `worker/gtm-writeback.test.ts` | `domain.ts`: 1 diagnostic (377066); test file: 0 |
+| `fleet-lsp doctor` on customer-vision | `typescript verified effect-tsgo 0.64.1` | `typescript verified effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)`, `pin: pnpm-lock.yaml @effect/tsgo 0.64.1`, no note |
+| repositories without `@effect/tsgo` (duro-app, website-builder, social-planner) | doctor unchanged | byte-identical to 0.5.6 |
+| no orphan | no effect-tsgo process left | after EOF: none (exit 0.065 s); after SIGKILL of fleet-lsp's group: none at +1/+3/+6 s; `effect-tsgo` hands over to the native `tsc`, which is fleet-lsp's direct child and group leader, and a `kill -9` of it leaves none while fleet-lsp stays up |
+| Claude Code on customer-vision | the planted `globalDate` shows, the test file shows none | Phase 2b, after the release |
+
 **Phase 0 (observed 2026-11-03, effect-tsgo 0.64.1 on customer-vision, `scripts/lsp-probe.py` extended with `--scenario`, `--pull`, `--diag-cap`, `--open-also`):**
 
 | scenario | `Loading` progress | pushed | pulled (`textDocument/diagnostic`) |
@@ -103,3 +115,10 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 
 
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,lang:rust,unix,tui,codex body-sha=3c689ace007f -->
+
+## Implementation review
+
+approve on the final tree, after round 1 (approve-with-changes: 5 blocking rule findings, 2 high plan findings) and two deltas; code review backend, lang:rust and unix approve-with-changes or approve on it.
+Fixed: output parameters, DocEvent and Diagnostics enums, banners, swallowed results, placeholder names, the plan record; a real `initialized`-without-params bug found end to end; process groups signalled at every kill site with kill(1) failures logged; root-only pin; closed files cleared while a server is down; pull errors logged; pending pulls keep a slot busy.
+deliberate: a server whose child ignores SIGTERM can hold the workspace loop up to `STOP_GRACE` (1 s) before SIGKILL (backend, rust, unix, implementation, low): bounded, and the normal case returns at once; no test drives the self-exit SIGKILL escalation with a TERM-ignoring grandchild (backend, low): the real server's self-exit was checked by hand above.
+Tokens: implementation 116k → 174k; backend 114k → 159k; lang:rust 94k → 135k; unix 80k → 125k.
