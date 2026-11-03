@@ -2355,3 +2355,236 @@ fn workspace_an_older_slots_late_retirement_keeps_the_newer_idle_marker() {
         events(&a)
     );
 }
+
+// ----------------------------------------------- effect-tsgo
+
+/// Node's `<platform>-<arch>` here, as `@effect/tsgo`'s platform packages
+/// are named.
+fn node_platform() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+fn executable(p: &Path, body: &str) {
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, body).unwrap();
+    fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// `fakebin/node` under `dir`: the Node the resolver asks for its version.
+fn fake_node(dir: &Path) {
+    executable(&dir.join("fakebin/node"), "#!/bin/sh\necho v24.14.0\n");
+}
+
+/// A pnpm project pinning `@effect/tsgo` 0.64.1, installed as pnpm would
+/// lay it out where fleet-lsp looks, whose `effect-tsgo` is the fake in
+/// effect-tsgo flavour.
+fn effect_repo(dir: &Path) {
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::write(dir.join("package.json"), "{}").unwrap();
+    fs::write(
+        dir.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\nimporters:\n\n  .:\n    devDependencies:\n      '@effect/tsgo':\n        specifier: 0.64.1\n        version: 0.64.1\n\npackages:\n\n  '@effect/tsgo@0.64.1':\n    resolution: {integrity: x}\n",
+    )
+    .unwrap();
+    let tsgo = dir.join("node_modules/@effect/tsgo");
+    fs::create_dir_all(tsgo.join("dist")).unwrap();
+    fs::write(
+        tsgo.join("package.json"),
+        r#"{"name":"@effect/tsgo","version":"0.64.1","bin":{"effect-tsgo":"./dist/effect-tsgo.cjs"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        tsgo.join("dist/effect-tsgo.cjs"),
+        "//#region upstream.json\nvar tags = {\n\t\"typescript\": { \"latest\": \"7.0.2\" }\n};\nvar components = {\n\t\"typescript\": { \"7.0.2\": {} }\n};\n\n//#endregion\n",
+    )
+    .unwrap();
+    let platform = dir.join(format!("node_modules/@effect/tsgo-{}", node_platform()));
+    fs::create_dir_all(platform.join("lib")).unwrap();
+    fs::write(platform.join("package.json"), r#"{"version":"0.64.1"}"#).unwrap();
+    fs::write(platform.join("lib/tsc"), "").unwrap();
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
+    executable(
+        &dir.join("node_modules/.bin/effect-tsgo"),
+        &format!(
+            "#!/bin/sh\nFAKE_FLAVOR=tsgo exec python3 -u '{}' \"$@\"\n",
+            fake.display()
+        ),
+    );
+    fs::write(dir.join("x.ts"), "export const x = 1\n").unwrap();
+}
+
+/// A TypeScript project on the adapter path, its adapter at an unmeasured
+/// version (no barrier), whose adapter is the fake.
+fn legacy_ts_repo(dir: &Path) {
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::write(dir.join("package.json"), "{}").unwrap();
+    fs::write(
+        dir.join("package-lock.json"),
+        "{\"packages\":{\"node_modules/typescript\": {\n \"version\": \"5.9.3\",\n},\"node_modules/typescript-language-server\": {\n \"version\": \"6.0.2\",\n}}}",
+    )
+    .unwrap();
+    for (name, v) in [
+        ("typescript", "5.9.3"),
+        ("typescript-language-server", "6.0.2"),
+    ] {
+        let pkg = dir.join("node_modules").join(name);
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("package.json"), format!(r#"{{"version":"{v}"}}"#)).unwrap();
+    }
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_server.py");
+    executable(
+        &dir.join("node_modules/.bin/typescript-language-server"),
+        &format!("#!/bin/sh\nexec python3 -u '{}' \"$@\"\n", fake.display()),
+    );
+    fs::write(dir.join("x.ts"), "export const x = 1\n").unwrap();
+}
+
+impl Fixture {
+    fn effect(name: &str) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("fleet-lsp-it-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        effect_repo(&dir);
+        fake_node(&dir);
+        Fixture { dir }
+    }
+}
+
+impl Session {
+    /// The first frame holding every one of `needles`, already read or
+    /// still to come.
+    fn frame_with(&self, needles: &[&str], within: Duration) -> String {
+        let all = |b: &str| needles.iter().all(|n| b.contains(n));
+        if let Some(b) = self.seen.borrow().iter().find(|b| all(b)) {
+            return b.clone();
+        }
+        self.recv_until(within, all)
+            .unwrap_or_else(|| panic!("no frame with {needles:?} within {within:?}"))
+            .1
+    }
+}
+
+const PUBLISH: &str = "textDocument/publishDiagnostics";
+const PULL_ID: &str = r#""id":"fleet-lsp-pull:"#;
+
+/// FALSIFY: forward pull replies to the client instead of the core.
+#[test]
+fn effect_tsgo_answers_once_initialized_and_publishes_pulled_diagnostics() {
+    let _light = light();
+    let fx = Fixture::effect("tsgo");
+    let path = fx.path_env();
+    let mut s = Session::start_args(
+        &fx,
+        &[("PATH", path.as_str())],
+        true,
+        &["serve", "typescript", "--min-version", "0.1.0"],
+    );
+    s.initialize(&fx.dir);
+    let file = fx.dir.join("x.ts");
+    s.open(&file, "typescript");
+    s.definition(1, &file);
+    let answer = s.answer(1, ANSWER);
+    assert!(answer.contains("file:///answer"), "{answer}");
+    let published = s.frame_with(&[PUBLISH, &uri(&file)], ANSWER);
+    assert!(
+        published.contains(&format!("fake diagnostic for {}", uri(&file))),
+        "{published}"
+    );
+    assert_eq!(count_kind(&fx.dir, "pull"), 1, "{:?}", fx.event_lines());
+    // An edit is pulled and published again.
+    s.change(&file, 2);
+    assert!(wait_for_count(&fx.dir, "pull", 2, ANSWER));
+    s.recv_until(ANSWER, |b| b.contains(PUBLISH))
+        .expect("the edit's diagnostics");
+    s.send(r#"{"jsonrpc":"2.0","id":9,"method":"shutdown"}"#);
+    s.answer(9, ANSWER);
+    s.send(EXIT);
+    assert_eq!(s.wait_exit(Duration::from_secs(15)), Some(0));
+    s.drain(Duration::from_millis(300));
+    assert_eq!(s.frames_with(PULL_ID), 0, "no pull id reaches the client");
+    assert_eq!(s.frames_with(PUBLISH), 2, "the bridge's, and only those");
+    let log = fs::read_dir(fx.dir.join("state/fleet-lsp/typescript"))
+        .unwrap()
+        .flatten()
+        .map(|e| fs::read_to_string(e.path()).unwrap_or_default())
+        .collect::<String>();
+    assert!(log.contains("barrier Tsgo"), "{log}");
+    assert!(
+        log.contains("version effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)"),
+        "{log}"
+    );
+}
+
+impl Workspace {
+    fn effect(&self, rel: &str) -> PathBuf {
+        let repo = self.dir.join(rel);
+        effect_repo(&repo);
+        fake_env(&repo, &[]);
+        repo
+    }
+
+    fn legacy_ts(&self, rel: &str) -> PathBuf {
+        let repo = self.dir.join(rel);
+        legacy_ts_repo(&repo);
+        fake_env(&repo, &[]);
+        repo
+    }
+}
+
+/// FALSIFY: push the startup replay to the outbox without `Core::started`.
+#[test]
+fn workspace_effect_tsgo_pulls_on_start_and_on_restart_beside_a_legacy_repository() {
+    let _light = light();
+    let ws = Workspace::new("tsgo");
+    let a = ws.effect("effect");
+    let b = ws.legacy_ts("legacy");
+    fake_node(&ws.dir);
+    let path = fake_path(&ws.dir);
+    let mut s = ws.start(
+        &[("PATH", path.as_str()), ("FLEET_LSP_MAX_CHILDREN", "1")],
+        "typescript",
+    );
+    let (fa, fb) = (a.join("x.ts"), b.join("x.ts"));
+    // Opened before its server starts: the start replays it and pulls it,
+    // with no edit.
+    s.open(&fa, "typescript");
+    s.definition(1, &fa);
+    assert!(answered_by(&s.answer(1, ANSWER), &a));
+    let first = s.frame_with(&[PUBLISH, &uri(&fa)], ANSWER);
+    let real_a = fs::canonicalize(&a).unwrap();
+    assert!(
+        first.contains(&format!("from {}", real_a.display())),
+        "{first}"
+    );
+    // The legacy repository evicts it (cap 1) and is pulled for nothing.
+    s.open(&fb, "typescript");
+    s.definition(2, &fb);
+    assert!(answered_by(&s.answer(2, ANSWER), &b));
+    // Back to the effect repository: a restart, replayed and pulled again.
+    s.definition(3, &fa);
+    assert!(answered_by(&s.answer(3, ANSWER), &a));
+    assert!(wait_for_count(&a, "pull", 2, ANSWER), "{:?}", events(&a));
+    s.drain(Duration::from_millis(500));
+    assert_eq!(count(&a, " root "), 2, "{:?}", events(&a));
+    assert_eq!(count(&a, "recv initialized "), 2, "{:?}", events(&a));
+    assert_eq!(count(&a, &format!("open {} 1", uri(&fa))), 2);
+    assert_eq!(count_kind(&a, "pull"), 2, "one pull per start");
+    assert_eq!(count(&b, "textDocument/diagnostic"), 0, "{:?}", events(&b));
+    assert_eq!(count_kind(&b, "open"), 1, "{:?}", events(&b));
+    assert_eq!(s.frames_with(&uri(&fb)), 0, "nothing published for b");
+    assert_eq!(s.frames_with(PUBLISH), 2, "{:?}", s.seen.borrow());
+    assert_eq!(s.frames_with(PULL_ID), 0, "no pull id reaches the client");
+    assert_eq!(
+        s.frames_with(r#""id":"fleet-lsp:"#),
+        0,
+        "no own id reaches the client"
+    );
+}

@@ -18,7 +18,7 @@
 //! kills it, and returns — process exit ends any writer still blocked.
 
 use crate::cli::{Lang, Version};
-use crate::core::{Action, ChildScope, Config, Core, Input, ServerFilter};
+use crate::core::{self, Action, ChildScope, Config, Core, Input, ServerFilter};
 use crate::frame::{write_frame_reporting, Frame, FrameReader};
 use crate::gate::{Barrier, Signal};
 use crate::json::{self, Json};
@@ -147,6 +147,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         log.line(&format!("refusing: {r}"));
     }
     let res_barrier = res.as_ref().map_or(Barrier::None, |r| r.barrier.clone());
+    let pull_diagnostics = refusal.is_none() && res.as_ref().is_some_and(|r| r.pull_diagnostics);
     let cfg = Config {
         lang: lang.name(),
         barrier: if refusal.is_some() {
@@ -161,6 +162,7 @@ pub(crate) fn serve(lang: Lang, min_version: Option<Result<Version, String>>) ->
         guard_pyright_log_level: lang == Lang::Python,
         scope: ChildScope::Session,
         project_root: res.as_ref().and_then(|r| r.project_root.clone()),
+        pull_diagnostics,
     };
     Shell::new(cfg, child, client, log).run(first)
 }
@@ -463,11 +465,17 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
                 }));
                 forward = !(method == "window/workDoneProgress/create" && f.own_progress);
             }
-            Kind::Response => {
-                if let Some(id) = s.id.clone() {
+            Kind::Response => match s.id.clone() {
+                // fleet-lsp's own diagnostic pull: its answer is the core's.
+                Some(id) if core::is_pull_id(&id) => {
+                    let _ = tx.send(Ev::Input(Input::PullReply { id, body }));
+                    continue;
+                }
+                Some(id) => {
                     let _ = tx.send(Ev::Input(Input::ServerResponse(id)));
                 }
-            }
+                None => {}
+            },
             Kind::Other => {}
         }
         if forward && out.push(SERVER, body).is_err() {

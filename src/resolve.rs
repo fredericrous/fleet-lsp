@@ -64,6 +64,9 @@ pub(crate) struct Resolution {
     /// The barrier for this version is not measured.
     pub(crate) narrowed: bool,
     pub(crate) tsserver_path: Option<String>,
+    /// The server answers `textDocument/diagnostic` and pushes nothing for
+    /// opened files (effect-tsgo): fleet-lsp pulls and publishes for it.
+    pub(crate) pull_diagnostics: bool,
 }
 
 impl Resolution {
@@ -86,6 +89,7 @@ impl Resolution {
             barrier: Barrier::None,
             narrowed: false,
             tsserver_path: None,
+            pull_diagnostics: false,
         }
     }
 
@@ -498,6 +502,7 @@ fn rust(git: PathBuf, root: PathBuf) -> Resolution {
         barrier: Barrier::RustAnalyzer,
         narrowed: false,
         tsserver_path: None,
+        pull_diagnostics: false,
     }
 }
 
@@ -728,6 +733,7 @@ fn go(git: PathBuf, root: PathBuf, probe: impl FnOnce(&Path, &Path) -> GoProbe) 
         barrier: Barrier::None,
         narrowed: false,
         tsserver_path: None,
+        pull_diagnostics: false,
     }
 }
 
@@ -934,6 +940,7 @@ fn python(git: PathBuf, root: PathBuf) -> Resolution {
         },
         narrowed: !measured,
         tsserver_path: None,
+        pull_diagnostics: false,
     }
 }
 
@@ -1026,6 +1033,14 @@ fn typescript(git: PathBuf, root: PathBuf, node: impl FnOnce() -> Node) -> Resol
     };
     let lock = lock.expect("matched Some above");
     let lock_text = fs::read_to_string(root.join(lock)).unwrap_or_default();
+    if let Some(tsgo_pinned) = lockfile_version(lock, &lock_text, EFFECT_TSGO) {
+        let lock = Lockfile {
+            name: lock,
+            text: &lock_text,
+            install,
+        };
+        return effect_tsgo(git, root, &lock, &tsgo_pinned, node);
+    }
     let Some(pinned) = lockfile_version(lock, &lock_text, "typescript") else {
         return refused(
             format!("{lock} has no typescript"),
@@ -1100,38 +1115,14 @@ fn typescript(git: PathBuf, root: PathBuf, node: impl FnOnce() -> Node) -> Resol
             .and_then(|n| n.as_str())
             .map(str::to_string)
     });
-    let node_version = match node() {
-        Node::Version(v) => v,
-        Node::NotOnPath => {
-            let mut r = refused(
-                "node is not on PATH".into(),
-                Fix::None("install Node".into()),
-            );
-            r.pin = Some(pin);
-            return r;
-        }
-        Node::Failed(path) => {
-            let mut r = refused(
-                format!("{} --version failed", path.display()),
-                Fix::None(format!("run {} --version to see why", path.display())),
-            );
+    let node_version = match node_for(node(), ADAPTER, node_min.as_deref()) {
+        Ok(v) => v,
+        Err((reason, fix)) => {
+            let mut r = refused(reason, fix);
             r.pin = Some(pin);
             return r;
         }
     };
-    if let Some(min) = node_min.as_deref().and_then(engines_floor) {
-        if !version_ge(&node_version, &min) {
-            let mut r = refused(
-                format!(
-                    "node {node_version} is older than {ADAPTER} needs ({})",
-                    node_min.as_deref().unwrap_or_default()
-                ),
-                Fix::None("upgrade Node".into()),
-            );
-            r.pin = Some(pin);
-            return r;
-        }
-    }
     let lib = root.join("node_modules/typescript/lib");
     let measured = adapter_version == TS_ADAPTER_MEASURED;
     Resolution {
@@ -1160,6 +1151,7 @@ fn typescript(git: PathBuf, root: PathBuf, node: impl FnOnce() -> Node) -> Resol
         },
         narrowed: !measured,
         tsserver_path: Some(lib.display().to_string()),
+        pull_diagnostics: false,
     }
 }
 
@@ -1169,6 +1161,303 @@ enum Node {
     NotOnPath,
     Failed(PathBuf),
     Version(String),
+}
+
+/// The version of the `node` that runs `package`, checked against the
+/// floor of its `engines.node`; or the refusal's reason and fix.
+fn node_for(node: Node, package: &str, engines: Option<&str>) -> Result<String, (String, Fix)> {
+    let version = match node {
+        Node::Version(v) => v,
+        Node::NotOnPath => {
+            return Err((
+                "node is not on PATH".into(),
+                Fix::None("install Node".into()),
+            ))
+        }
+        Node::Failed(path) => {
+            return Err((
+                format!("{} --version failed", path.display()),
+                Fix::None(format!("run {} --version to see why", path.display())),
+            ))
+        }
+    };
+    if let Some(min) = engines.and_then(engines_floor) {
+        if !version_ge(&version, &min) {
+            return Err((
+                format!(
+                    "node {version} is older than {package} needs ({})",
+                    engines.unwrap_or_default()
+                ),
+                Fix::None("upgrade Node".into()),
+            ));
+        }
+    }
+    Ok(version)
+}
+
+// ---------------------------------------------------------------- effect-tsgo
+
+/// A repository that pins it is served by its `effect-tsgo tsc --lsp`.
+const EFFECT_TSGO: &str = "@effect/tsgo";
+/// The wrapper and the compiler it runs whose readiness is measured
+/// (docs/readiness.md).
+const TSGO_MEASURED: (&str, &str) = ("0.64.1", "7.0.2");
+/// The packages whose native (7 or newer) TypeScript the wrapper's `tsc`
+/// runs instead of its bundled `latest`, first found first.
+const TSGO_SELECTORS: [&str; 2] = ["typescript", "@typescript/native"];
+
+/// The lockfile a TypeScript project was resolved from.
+struct Lockfile<'a> {
+    name: &'a str,
+    text: &'a str,
+    /// The command that installs exactly what it pins.
+    install: &'a str,
+}
+
+/// What an `@effect/tsgo` wrapper bundles: its `upstream.json` region.
+#[derive(Debug, PartialEq)]
+struct Bundled {
+    /// `tags.typescript.latest`: run when no supported native TypeScript
+    /// is installed.
+    latest: String,
+    /// The keys of `components.typescript`.
+    supported: Vec<String>,
+}
+
+/// The project's `@effect/tsgo`, verified as the `typescript` adapter path
+/// is: the pin installed, its bin and its platform package present, the
+/// compiler it will select known and installed, and Node on PATH.
+fn effect_tsgo(
+    git: PathBuf,
+    root: PathBuf,
+    lock: &Lockfile,
+    pinned: &str,
+    node: impl FnOnce() -> Node,
+) -> Resolution {
+    let pin = format!("{} {EFFECT_TSGO} {pinned}", lock.name);
+    let refused = |reason: String, fix: Fix, pin: &str| {
+        let mut r = Resolution::refused(
+            Lang::TypeScript,
+            Some(git.clone()),
+            Some(root.clone()),
+            reason,
+            fix,
+        );
+        r.pin = Some(pin.to_string());
+        r
+    };
+    let reinstall = || Fix::Command(lock.install.into());
+    let not_installed =
+        |pin: &str| refused(format!("{EFFECT_TSGO} is not installed"), reinstall(), pin);
+    let modules = root.join("node_modules");
+    let package = modules.join(EFFECT_TSGO);
+    let Some(installed) = package_version(&package) else {
+        return not_installed(&pin);
+    };
+    if installed != pinned {
+        let mut r = refused(
+            format!("stale node_modules: {EFFECT_TSGO} {installed}, pinned {pinned}"),
+            reinstall(),
+            &pin,
+        );
+        r.version = Some(installed);
+        return r;
+    }
+    let bin = modules.join(".bin/effect-tsgo");
+    if !bin.exists() {
+        return not_installed(&pin);
+    }
+    let Some(platform) = tsgo_platform_package(&package) else {
+        return not_installed(&pin);
+    };
+    match package_version(&platform) {
+        None => return not_installed(&pin),
+        Some(v) if v != pinned => {
+            let name = format!("{EFFECT_TSGO}-{}", tsgo_platform().unwrap_or_default());
+            return refused(
+                format!("stale node_modules: {name} {v}, pinned {pinned}"),
+                reinstall(),
+                &pin,
+            );
+        }
+        Some(_) => {}
+    }
+    // The wrapper runs the first installed native TypeScript; one that is
+    // not what the lockfile pins is not verified.
+    let mut selected = None;
+    for name in TSGO_SELECTORS {
+        let Some(v) = package_version(&modules.join(name)).filter(|v| native_typescript(v)) else {
+            continue;
+        };
+        let locked = lockfile_version(lock.name, lock.text, name);
+        if locked.as_deref() != Some(v.as_str()) {
+            return refused(
+                format!(
+                    "stale node_modules: {name} {v}, pinned {}; {EFFECT_TSGO} would run it",
+                    locked.as_deref().unwrap_or("nowhere")
+                ),
+                reinstall(),
+                &pin,
+            );
+        }
+        if selected.is_none() {
+            selected = Some((name, v));
+        }
+    }
+    let bundled = bundled_compilers(&package);
+    let compiler = bundled.as_ref().map(|b| match &selected {
+        Some((_, v)) if b.supported.contains(v) => v.clone(),
+        _ => b.latest.clone(),
+    });
+    if let (Some(b), Some(c)) = (&bundled, &compiler) {
+        if !platform.join(tsgo_compiler_path(b, c)).exists() {
+            return not_installed(&pin);
+        }
+    }
+    let pin = match &selected {
+        Some((name, v)) => format!("{pin}, {name} {v}"),
+        None => pin,
+    };
+    // 0.64.1 declares no `engines.node`; a later one is honoured.
+    let engines = read_package_json(&package.join("package.json")).and_then(|j| {
+        j.get("engines")
+            .and_then(|e| e.get("node"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+    });
+    let node_version = match node_for(node(), EFFECT_TSGO, engines.as_deref()) {
+        Ok(v) => v,
+        Err((reason, fix)) => {
+            let reason = if reason.contains(EFFECT_TSGO) {
+                reason
+            } else {
+                format!("{reason}; {EFFECT_TSGO} runs on it")
+            };
+            return refused(reason, fix, &pin);
+        }
+    };
+    let compiler = compiler.unwrap_or_else(|| "unknown".into());
+    let measured = installed == TSGO_MEASURED.0 && compiler == TSGO_MEASURED.1;
+    Resolution {
+        lang: Lang::TypeScript,
+        git_root: Some(git),
+        project_root: Some(root.clone()),
+        pin: Some(pin),
+        server: Some(bin.clone()),
+        version: Some(format!(
+            "effect-tsgo {installed} (typescript {compiler}, node {node_version})"
+        )),
+        verdict: Verdict::Verified,
+        spawn: Some(Spawn {
+            program: bin,
+            args: vec!["tsc".into(), "--lsp".into(), "--stdio".into()],
+            cwd: root,
+            ..Spawn::default()
+        }),
+        barrier: if measured {
+            Barrier::Tsgo
+        } else {
+            Barrier::None
+        },
+        narrowed: !measured,
+        tsserver_path: None,
+        pull_diagnostics: true,
+    }
+}
+
+/// The `version` of the package installed in `dir`.
+fn package_version(dir: &Path) -> Option<String> {
+    read_package_json(&dir.join("package.json"))?
+        .get("version")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// TypeScript 7 or newer: the wrapper's `isNativeTypescriptVersion`.
+fn native_typescript(version: &str) -> bool {
+    let major: String = version
+        .trim()
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    major.parse::<u64>().is_ok_and(|m| m >= 7)
+}
+
+/// Node's `<platform>-<arch>` for this machine, as the platform packages
+/// are named (`@effect/tsgo-darwin-arm64`).
+fn tsgo_platform() -> Option<String> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "win32",
+        _ => return None,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        _ => return None,
+    };
+    Some(format!("{os}-{arch}"))
+}
+
+/// The platform package that holds the compilers, as Node resolves it from
+/// the wrapper's real directory (pnpm keeps both under `.pnpm`).
+fn tsgo_platform_package(package: &Path) -> Option<PathBuf> {
+    let name = format!("tsgo-{}", tsgo_platform()?);
+    let real = fs::canonicalize(package).ok()?;
+    let nested = real.join("node_modules/@effect").join(&name);
+    let beside = real.parent()?.join(&name);
+    [nested, beside].into_iter().find(|p| p.is_dir())
+}
+
+/// Where the platform package keeps compiler `version`: the wrapper's
+/// `packagedComponentPath`.
+fn tsgo_compiler_path(bundled: &Bundled, version: &str) -> PathBuf {
+    if version == bundled.latest {
+        PathBuf::from("lib/tsc")
+    } else {
+        PathBuf::from("artifacts/typescript")
+            .join(version)
+            .join("tsc")
+    }
+}
+
+/// The compilers the wrapper bundles, read from the `upstream.json` region
+/// of its bin script; `None` when that region is not there or not JSON.
+fn bundled_compilers(package: &Path) -> Option<Bundled> {
+    let bin = read_package_json(&package.join("package.json"))
+        .and_then(|j| {
+            j.get("bin")
+                .and_then(|b| b.get("effect-tsgo"))
+                .and_then(|b| b.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "dist/effect-tsgo.cjs".into());
+    parse_upstream(&fs::read_to_string(package.join(bin)).ok()?)
+}
+
+/// `var tags = {…};` and `var components = {…};` after
+/// `//#region upstream.json`: both are JSON.
+fn parse_upstream(script: &str) -> Option<Bundled> {
+    let region = &script[script.find("//#region upstream.json")?..];
+    let object = |name: &str| {
+        let start = region.find(&format!("var {name} = "))? + name.len() + 7;
+        let len = region[start..].find("\n};")? + 2;
+        crate::json::parse(&region[start..start + len]).ok()
+    };
+    let latest = object("tags")?
+        .get("typescript")?
+        .get("latest")?
+        .as_str()?
+        .to_string();
+    let mut supported: Vec<String> = match object("components")?.get("typescript")? {
+        crate::json::Json::Obj(m) => m.keys().cloned().collect(),
+        _ => return None,
+    };
+    supported.sort();
+    Some(Bundled { latest, supported })
 }
 
 fn node_on_path() -> Node {
@@ -1236,8 +1525,9 @@ pub(crate) fn lockfile_version(kind: &str, text: &str, name: &str) -> Option<Str
             Some(strip(v.split(',').next()?))
         }
         "pnpm-lock.yaml" => {
-            // The root importer's resolved version first.
-            let key = format!("{name}:");
+            // The root importer's resolved version first. A scoped name is
+            // quoted: `'@effect/tsgo':`, `'@effect/tsgo@0.64.1':`.
+            let keys = [format!("{name}:"), format!("'{name}':")];
             let mut in_importers = false;
             let mut in_root = false;
             let mut lines = text.lines().peekable();
@@ -1254,7 +1544,7 @@ pub(crate) fn lockfile_version(kind: &str, text: &str, name: &str) -> Option<Str
                     in_root = l.trim() == ".:" || l.trim() == "'.':";
                     continue;
                 }
-                if in_importers && in_root && l.trim() == key {
+                if in_importers && in_root && keys.iter().any(|k| l.trim() == k) {
                     for next in lines.by_ref().take(3) {
                         if let Some(v) = next.trim().strip_prefix("version:") {
                             return Some(strip(v));
@@ -1262,10 +1552,10 @@ pub(crate) fn lockfile_version(kind: &str, text: &str, name: &str) -> Option<Str
                     }
                 }
             }
-            let prefix = format!("  {name}@");
+            let prefixes = [format!("  {name}@"), format!("  '{name}@")];
             let mut versions: Vec<String> = text
                 .lines()
-                .filter_map(|l| l.strip_prefix(prefix.as_str()))
+                .filter_map(|l| prefixes.iter().find_map(|p| l.strip_prefix(p.as_str())))
                 .map(|v| strip(v.trim_end_matches([':', '{', '}', ' '])))
                 .collect();
             versions.sort();
@@ -1811,6 +2101,433 @@ mod tests {
         let (reason, fix) = refusal(&ts_with(&t, Node::Failed("/x/node".into())));
         assert_eq!(reason, "/x/node --version failed");
         assert_eq!(fix, Fix::None("run /x/node --version to see why".into()));
+    }
+
+    // ------------------------------------------------------------ effect-tsgo
+
+    #[test]
+    fn effect_tsgo_is_read_from_every_lockfile_format() {
+        let pnpm = "lockfileVersion: '9.0'\nimporters:\n\n  .:\n    devDependencies:\n      '@effect/tsgo':\n        specifier: 0.64.1\n        version: 0.64.1\n      typescript:\n        specifier: ^5.9.3\n        version: 5.9.3\n\npackages:\n\n  '@effect/tsgo-darwin-arm64@0.64.1':\n    resolution: {integrity: x}\n\n  '@effect/tsgo@0.64.1':\n    resolution: {integrity: y}\n    hasBin: true\n";
+        assert_eq!(
+            lockfile_version("pnpm-lock.yaml", pnpm, EFFECT_TSGO),
+            Some("0.64.1".into())
+        );
+        assert_eq!(
+            lockfile_version("pnpm-lock.yaml", pnpm, "typescript"),
+            Some("5.9.3".into())
+        );
+        // Only the package key, as in a member-only pin.
+        let packages = "lockfileVersion: '9.0'\npackages:\n\n  '@effect/tsgo-linux-x64@0.64.1':\n    resolution: {integrity: x}\n\n  '@effect/tsgo@0.64.1':\n    resolution: {integrity: y}\n";
+        assert_eq!(
+            lockfile_version("pnpm-lock.yaml", packages, EFFECT_TSGO),
+            Some("0.64.1".into())
+        );
+        let npm = "{\"packages\":{\"node_modules/@effect/tsgo\": {\n \"version\": \"0.64.1\",\n},\"node_modules/@effect/tsgo-darwin-x64\": {\n \"version\": \"0.64.1\",\n}}}";
+        assert_eq!(
+            lockfile_version("package-lock.json", npm, EFFECT_TSGO),
+            Some("0.64.1".into())
+        );
+        let yarn = "\"@effect/tsgo-linux-x64@npm:0.64.1\":\n  version: 0.64.1\n\n\"@effect/tsgo@npm:0.64.1\":\n  version: 0.64.1\n  resolution: \"@effect/tsgo@npm:0.64.1\"\n";
+        assert_eq!(
+            lockfile_version("yarn.lock", yarn, EFFECT_TSGO),
+            Some("0.64.1".into())
+        );
+        let bun = "{ \"packages\": { \"@effect/tsgo\": [\"@effect/tsgo@0.64.1\", \"\", {}], \"@effect/tsgo-linux-x64\": [\"@effect/tsgo-linux-x64@0.64.1\", \"\", {}] } }";
+        assert_eq!(
+            lockfile_version("bun.lock", bun, EFFECT_TSGO),
+            Some("0.64.1".into())
+        );
+        for (kind, text) in [
+            ("pnpm-lock.yaml", "importers:\n\n  .:\n    devDependencies:\n      typescript:\n        version: 5.9.3\n"),
+            ("package-lock.json", "{}"),
+            ("yarn.lock", "\"typescript@^5\":\n  version \"5.9.3\"\n"),
+            ("bun.lock", "{}"),
+        ] {
+            assert_eq!(lockfile_version(kind, text, EFFECT_TSGO), None, "{kind}");
+        }
+    }
+
+    /// The `upstream.json` region of `@effect/tsgo` 0.64.1's bin script.
+    const UPSTREAM_0_64_1: &str = "var metadata_default = {};\n\n//#endregion\n//#region upstream.json\nvar tags = {\n\t\"typescript\": {\n\t\t\"latest\": \"7.0.2\",\n\t\t\"beta\": \"7.1.0-beta\",\n\t\t\"next\": \"7.1.0-dev.20261101.1\"\n\t},\n\t\"oxlint\": { \"latest\": \"1.90.0\" }\n};\nvar components = {\n\t\"typescript\": {\n\t\t\"7.0.2\": {\n\t\t\t\"gitHead\": \"2bd0\",\n\t\t\t\"provider\": \"typescript-go\"\n\t\t},\n\t\t\"7.1.0-beta\": { \"gitHead\": \"3e92\", \"provider\": \"typescript\" },\n\t\t\"7.1.0-dev.20261101.1\": { \"gitHead\": \"6161\", \"provider\": \"typescript\" }\n\t},\n\t\"oxlint\": { \"1.90.0\": { \"gitHead\": \"9b6f\" } }\n};\n\n//#endregion\nconst x = 1;\n";
+
+    #[test]
+    fn the_bundled_compilers_are_read_from_the_wrapper() {
+        assert_eq!(
+            parse_upstream(UPSTREAM_0_64_1),
+            Some(Bundled {
+                latest: "7.0.2".into(),
+                supported: vec![
+                    "7.0.2".into(),
+                    "7.1.0-beta".into(),
+                    "7.1.0-dev.20261101.1".into()
+                ],
+            })
+        );
+        assert_eq!(parse_upstream("var tags = {};"), None);
+        assert!(native_typescript("7.0.2") && native_typescript("10.0.0-dev"));
+        assert!(!native_typescript("5.9.3") && !native_typescript("next"));
+    }
+
+    /// What one effect-tsgo fixture has; `Default` is the measured,
+    /// complete install with no native TypeScript.
+    #[derive(Clone)]
+    struct TsgoSetup {
+        locked: &'static str,
+        installed: Option<&'static str>,
+        bin: bool,
+        platform: Option<&'static str>,
+        /// `(package, locked, installed)`.
+        selectors: Vec<(&'static str, Option<&'static str>, &'static str)>,
+        upstream: &'static str,
+        /// The compilers the platform package holds besides `lib/tsc`.
+        artifacts: Vec<&'static str>,
+        latest_binary: bool,
+    }
+
+    impl Default for TsgoSetup {
+        fn default() -> TsgoSetup {
+            TsgoSetup {
+                locked: "0.64.1",
+                installed: Some("0.64.1"),
+                bin: true,
+                platform: Some("0.64.1"),
+                selectors: Vec::new(),
+                upstream: UPSTREAM_0_64_1,
+                artifacts: vec!["7.1.0-beta", "7.1.0-dev.20261101.1"],
+                latest_binary: true,
+            }
+        }
+    }
+
+    /// An npm project pinning `@effect/tsgo`, laid out as `npm ci` would.
+    fn tsgo_project(name: &str, setup: &TsgoSetup) -> Tree {
+        let t = Tree::new(name);
+        let mut lock = format!(
+            "{{\"packages\":{{\"node_modules/@effect/tsgo\": {{\n \"version\": \"{}\",\n}}",
+            setup.locked
+        );
+        for (package, locked, _) in &setup.selectors {
+            if let Some(v) = locked {
+                lock.push_str(&format!(
+                    ",\"node_modules/{package}\": {{\n \"version\": \"{v}\",\n}}"
+                ));
+            }
+        }
+        lock.push_str("}}");
+        t.file("package.json", "{}")
+            .file("package-lock.json", &lock);
+        if let Some(v) = setup.installed {
+            t.file(
+                "node_modules/@effect/tsgo/package.json",
+                &format!(
+                    "{{\"name\":\"@effect/tsgo\",\"version\":\"{v}\",\"bin\":{{\"effect-tsgo\":\"./dist/effect-tsgo.cjs\"}}}}"
+                ),
+            )
+            .file("node_modules/@effect/tsgo/dist/effect-tsgo.cjs", setup.upstream);
+        }
+        if setup.bin {
+            t.file("node_modules/.bin/effect-tsgo", "#!/bin/sh\n");
+        }
+        let platform = format!("node_modules/@effect/tsgo-{}", tsgo_platform().unwrap());
+        if let Some(v) = setup.platform {
+            t.file(
+                &format!("{platform}/package.json"),
+                &format!("{{\"version\":\"{v}\"}}"),
+            );
+            if setup.latest_binary {
+                t.file(&format!("{platform}/lib/tsc"), "");
+            }
+            for a in &setup.artifacts {
+                t.file(&format!("{platform}/artifacts/typescript/{a}/tsc"), "");
+            }
+        }
+        for (package, _, installed) in &setup.selectors {
+            t.file(
+                &format!("node_modules/{package}/package.json"),
+                &format!("{{\"version\":\"{installed}\"}}"),
+            );
+        }
+        t
+    }
+
+    fn tsgo_with(name: &str, setup: &TsgoSetup) -> (Tree, Resolution) {
+        let t = tsgo_project(name, setup);
+        let r = ts_with(&t, node("24.14.0"));
+        (t, r)
+    }
+
+    /// FALSIFY: drop the `@effect/tsgo` branch from `typescript`.
+    #[test]
+    fn effect_tsgo_is_served_where_the_lockfile_pins_it() {
+        let (t, r) = tsgo_with("tsgo-ok", &TsgoSetup::default());
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(
+            r.version.as_deref(),
+            Some("effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)")
+        );
+        assert_eq!(
+            r.pin.as_deref(),
+            Some("package-lock.json @effect/tsgo 0.64.1")
+        );
+        assert_eq!(r.server, Some(t.p("node_modules/.bin/effect-tsgo")));
+        let spawn = r.spawn.clone().unwrap();
+        assert_eq!(spawn.program, t.p("node_modules/.bin/effect-tsgo"));
+        assert_eq!(
+            spawn.args,
+            vec![OsString::from("tsc"), "--lsp".into(), "--stdio".into()]
+        );
+        assert_eq!(spawn.cwd, t.p(""));
+        assert!(spawn.env_remove.is_empty() && spawn.env_set.is_empty());
+        assert_eq!(r.tsserver_path, None);
+        assert_eq!(r.barrier, Barrier::Tsgo);
+        assert!(!r.narrowed);
+        assert!(r.pull_diagnostics);
+        // Neither typescript nor its language server is asked for.
+        assert!(!t.p("node_modules/typescript").exists());
+    }
+
+    #[test]
+    fn a_project_without_effect_tsgo_keeps_the_adapter_and_no_bridge() {
+        let t = ts_project("ts-no-tsgo", Some("6.0.1"), Some("6.0.1"), ">=1.0.0");
+        let r = ts_with(&t, node("24.14.0"));
+        assert_eq!(r.verdict, Verdict::Verified);
+        assert!(!r.pull_diagnostics);
+        assert_eq!(r.spawn.unwrap().args, vec![OsString::from("--stdio")]);
+    }
+
+    /// FALSIFY: treat every compiler bundled with 0.64.1 as measured.
+    #[test]
+    fn another_bundled_compiler_gets_the_narrowed_promise() {
+        let setup = TsgoSetup {
+            selectors: vec![("typescript", Some("7.1.0-beta"), "7.1.0-beta")],
+            ..TsgoSetup::default()
+        };
+        let (_t, r) = tsgo_with("tsgo-beta", &setup);
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(
+            r.version.as_deref(),
+            Some("effect-tsgo 0.64.1 (typescript 7.1.0-beta, node 24.14.0)")
+        );
+        assert_eq!(
+            r.pin.as_deref(),
+            Some("package-lock.json @effect/tsgo 0.64.1, typescript 7.1.0-beta")
+        );
+        assert_eq!(r.barrier, Barrier::None);
+        assert!(r.narrowed && r.pull_diagnostics);
+        // Another wrapper with the measured compiler is not measured either.
+        let other = TsgoSetup {
+            locked: "0.65.0",
+            installed: Some("0.65.0"),
+            platform: Some("0.65.0"),
+            ..TsgoSetup::default()
+        };
+        let (_t, r) = tsgo_with("tsgo-065", &other);
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(r.barrier, Barrier::None);
+        assert!(r.narrowed);
+    }
+
+    #[test]
+    fn the_compiler_follows_the_wrappers_selectors() {
+        let compiler = |name: &str, selectors| {
+            let setup = TsgoSetup {
+                selectors,
+                ..TsgoSetup::default()
+            };
+            let (_t, r) = tsgo_with(name, &setup);
+            assert_eq!(r.verdict, Verdict::Verified, "{name}: {:?}", r.verdict);
+            r.version.unwrap()
+        };
+        // TypeScript 5 is not native: the bundled latest runs.
+        assert!(
+            compiler("sel-ts5", vec![("typescript", Some("5.9.3"), "5.9.3")])
+                .contains("(typescript 7.0.2,")
+        );
+        // A native one the wrapper does not bundle: the bundled latest runs.
+        assert!(
+            compiler("sel-709", vec![("typescript", Some("7.0.9"), "7.0.9")])
+                .contains("(typescript 7.0.2,")
+        );
+        // `@typescript/native` when `typescript` is not native.
+        assert!(compiler(
+            "sel-native",
+            vec![
+                ("typescript", Some("5.9.3"), "5.9.3"),
+                (
+                    "@typescript/native",
+                    Some("7.1.0-dev.20261101.1"),
+                    "7.1.0-dev.20261101.1"
+                ),
+            ]
+        )
+        .contains("(typescript 7.1.0-dev.20261101.1,"));
+        // The first native one wins.
+        assert!(compiler(
+            "sel-first",
+            vec![
+                ("typescript", Some("7.1.0-beta"), "7.1.0-beta"),
+                (
+                    "@typescript/native",
+                    Some("7.1.0-dev.20261101.1"),
+                    "7.1.0-dev.20261101.1"
+                ),
+            ]
+        )
+        .contains("(typescript 7.1.0-beta,"));
+    }
+
+    /// FALSIFY: skip the lockfile check of an installed native selector.
+    #[test]
+    fn a_stale_native_selector_is_refused() {
+        for (name, selectors, text) in [
+            (
+                "sel-stale",
+                vec![("typescript", Some("7.0.2"), "7.1.0-beta")],
+                "stale node_modules: typescript 7.1.0-beta, pinned 7.0.2; @effect/tsgo would run it",
+            ),
+            (
+                "sel-unpinned",
+                vec![("@typescript/native", None, "7.1.0-beta")],
+                "stale node_modules: @typescript/native 7.1.0-beta, pinned nowhere; @effect/tsgo would run it",
+            ),
+        ] {
+            let setup = TsgoSetup {
+                selectors,
+                ..TsgoSetup::default()
+            };
+            let (_t, r) = tsgo_with(name, &setup);
+            let (reason, fix) = refusal(&r);
+            assert_eq!(reason, text);
+            assert_eq!(fix, Fix::Command("npm ci".into()));
+            assert_eq!(r.pin.as_deref(), Some("package-lock.json @effect/tsgo 0.64.1"));
+        }
+    }
+
+    /// FALSIFY: verify a missing platform package.
+    #[test]
+    fn each_effect_tsgo_refusal_names_it_with_its_fix_and_pin() {
+        let platform = format!("@effect/tsgo-{}", tsgo_platform().unwrap());
+        let cases: Vec<(&str, TsgoSetup, String)> = vec![
+            (
+                "tsgo-missing",
+                TsgoSetup {
+                    installed: None,
+                    ..TsgoSetup::default()
+                },
+                "@effect/tsgo is not installed".into(),
+            ),
+            (
+                "tsgo-stale",
+                TsgoSetup {
+                    installed: Some("0.63.0"),
+                    ..TsgoSetup::default()
+                },
+                "stale node_modules: @effect/tsgo 0.63.0, pinned 0.64.1".into(),
+            ),
+            (
+                "tsgo-nobin",
+                TsgoSetup {
+                    bin: false,
+                    ..TsgoSetup::default()
+                },
+                "@effect/tsgo is not installed".into(),
+            ),
+            (
+                "tsgo-noplatform",
+                TsgoSetup {
+                    platform: None,
+                    ..TsgoSetup::default()
+                },
+                "@effect/tsgo is not installed".into(),
+            ),
+            (
+                "tsgo-staleplatform",
+                TsgoSetup {
+                    platform: Some("0.63.0"),
+                    ..TsgoSetup::default()
+                },
+                format!("stale node_modules: {platform} 0.63.0, pinned 0.64.1"),
+            ),
+            (
+                "tsgo-nocompiler",
+                TsgoSetup {
+                    latest_binary: false,
+                    ..TsgoSetup::default()
+                },
+                "@effect/tsgo is not installed".into(),
+            ),
+        ];
+        for (name, setup, text) in cases {
+            let (_t, r) = tsgo_with(name, &setup);
+            let (reason, fix) = refusal(&r);
+            assert_eq!(reason, text, "{name}");
+            assert!(reason.contains(EFFECT_TSGO), "{name}");
+            assert_eq!(fix, Fix::Command("npm ci".into()), "{name}");
+            assert_eq!(
+                r.pin.as_deref(),
+                Some("package-lock.json @effect/tsgo 0.64.1"),
+                "{name}"
+            );
+        }
+        let t = tsgo_project("tsgo-nonode", &TsgoSetup::default());
+        let r = ts_with(&t, Node::NotOnPath);
+        let (reason, fix) = refusal(&r);
+        assert_eq!(reason, "node is not on PATH; @effect/tsgo runs on it");
+        assert_eq!(fix, Fix::None("install Node".into()));
+        assert_eq!(
+            r.pin.as_deref(),
+            Some("package-lock.json @effect/tsgo 0.64.1")
+        );
+    }
+
+    #[test]
+    fn the_platform_package_is_found_beside_pnpms_real_path() {
+        let t = Tree::new("tsgo-pnpm");
+        let store = "node_modules/.pnpm/@effect+tsgo@0.64.1/node_modules/@effect";
+        let platform = format!("{store}/tsgo-{}", tsgo_platform().unwrap());
+        t.file("package.json", "{}")
+            .file(
+                "pnpm-lock.yaml",
+                "lockfileVersion: '9.0'\nimporters:\n\n  .:\n    devDependencies:\n      '@effect/tsgo':\n        specifier: 0.64.1\n        version: 0.64.1\n",
+            )
+            .file(
+                &format!("{store}/tsgo/package.json"),
+                "{\"version\":\"0.64.1\",\"bin\":{\"effect-tsgo\":\"./dist/effect-tsgo.cjs\"}}",
+            )
+            .file(&format!("{store}/tsgo/dist/effect-tsgo.cjs"), UPSTREAM_0_64_1)
+            .file(&format!("{platform}/package.json"), "{\"version\":\"0.64.1\"}")
+            .file(&format!("{platform}/lib/tsc"), "")
+            .file("node_modules/.bin/effect-tsgo", "#!/bin/sh\n");
+        fs::create_dir_all(t.p("node_modules/@effect")).unwrap();
+        std::os::unix::fs::symlink(
+            "../.pnpm/@effect+tsgo@0.64.1/node_modules/@effect/tsgo",
+            t.p("node_modules/@effect/tsgo"),
+        )
+        .unwrap();
+        let r = ts_with(&t, node("24.14.0"));
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(r.pin.as_deref(), Some("pnpm-lock.yaml @effect/tsgo 0.64.1"));
+        assert_eq!(r.barrier, Barrier::Tsgo);
+        // The fix is pnpm's.
+        fs::remove_dir_all(t.p(&platform)).unwrap();
+        let (_, fix) = refusal(&ts_with(&t, node("24.14.0")));
+        assert_eq!(fix, Fix::Command("pnpm install --frozen-lockfile".into()));
+    }
+
+    #[test]
+    fn an_unreadable_wrapper_leaves_the_compiler_unknown_and_narrowed() {
+        let setup = TsgoSetup {
+            upstream: "module.exports = {};\n",
+            ..TsgoSetup::default()
+        };
+        let (_t, r) = tsgo_with("tsgo-unknown", &setup);
+        assert_eq!(r.verdict, Verdict::Verified, "{:?}", r.verdict);
+        assert_eq!(
+            r.version.as_deref(),
+            Some("effect-tsgo 0.64.1 (typescript unknown, node 24.14.0)")
+        );
+        assert_eq!(r.barrier, Barrier::None);
+        assert!(r.narrowed);
     }
 
     #[test]

@@ -94,6 +94,7 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 | D: as C without advertising pull | as B | as B | same as C |
 
 - **Loading starts on `didOpen`**, not at spawn: the gate opens on `initialized` (Behaviour 3's fallback); `Loading` is one round per project.
+- **A pull sent at `didOpen` waits for loading** (3 runs, pull 0 s after `didOpen`: answered 0.6–0.9 s later, `full`, the planted `globalDate`), so the bridge pulls at once and needs no retry.
 - **Diagnostics are pull-only**: effect-tsgo pushes nothing for opened files, advertised or not, and answers pulls with the plugin's rules and `overrides` applied. Behaviour 4's pull bridge is built.
 
 

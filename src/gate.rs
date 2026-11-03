@@ -21,6 +21,10 @@ pub(crate) enum Barrier {
         version: String,
         tsserver_js: String,
     },
+    /// effect-tsgo 0.64.1 with TypeScript 7.0.2: its `Loading` progress
+    /// starts only on the first `didOpen` (docs/readiness.md), so the gate
+    /// opens once the client's `initialized` has been relayed.
+    Tsgo,
 }
 
 pub(crate) const TS_PROGRESS_TITLE: &str = "Initializing JS/TS language features";
@@ -49,6 +53,9 @@ pub(crate) enum Signal {
         token: String,
     },
     Log(String),
+    /// fleet-lsp relayed `initialized` to the server (said by the relay,
+    /// not the server).
+    Initialized,
 }
 
 /// A change the relay must act on.
@@ -74,9 +81,10 @@ impl Gate {
     pub(crate) fn new(barrier: Barrier) -> Gate {
         let state = match barrier {
             Barrier::None => State::Open,
-            Barrier::RustAnalyzer | Barrier::PyrightEnumeration | Barrier::TypeScript { .. } => {
-                State::Closed
-            }
+            Barrier::RustAnalyzer
+            | Barrier::PyrightEnumeration
+            | Barrier::TypeScript { .. }
+            | Barrier::Tsgo => State::Closed,
         };
         Gate {
             barrier,
@@ -107,6 +115,7 @@ impl Gate {
                 Some(State::Open)
             }
             (Barrier::TypeScript { .. }, _) => self.typescript(signal),
+            (Barrier::Tsgo, Signal::Initialized) => Some(State::Open),
             _ => None,
         };
         if let Some(next) = next {
@@ -369,6 +378,50 @@ mod tests {
         });
         assert!(g.on(&Signal::ProgressEnd { token: "t".into() }).is_empty());
         assert!(matches!(g.state(), State::Failed(_)));
+    }
+
+    /// FALSIFY: open `Barrier::Tsgo` on a `$/progress` end.
+    #[test]
+    fn tsgo_opens_on_initialized_and_on_nothing_a_server_says() {
+        let mut g = Gate::new(Barrier::Tsgo);
+        assert_eq!(g.state(), &State::Closed);
+        let report = r#"Using Typescript version (user-setting) 5.9.3 from path "/r/tsserver.js""#;
+        for signal in [
+            Signal::Log(report.into()),
+            Signal::ProgressBegin {
+                token: "t".into(),
+                title: TS_PROGRESS_TITLE.into(),
+            },
+            Signal::ProgressEnd { token: "t".into() },
+            Signal::ProgressBegin {
+                token: "l".into(),
+                title: "Loading".into(),
+            },
+            Signal::ProgressEnd { token: "l".into() },
+            status("ok", true, None),
+            Signal::Log("Found 3 source files".into()),
+        ] {
+            assert!(g.on(&signal).is_empty(), "{signal:?}");
+        }
+        assert_eq!(g.state(), &State::Closed);
+        assert_eq!(g.on(&Signal::Initialized), vec![Effect::Now(State::Open)]);
+        assert!(g.on(&Signal::Initialized).is_empty(), "opens once");
+    }
+
+    #[test]
+    fn initialized_opens_no_other_barrier() {
+        for barrier in [
+            Barrier::RustAnalyzer,
+            Barrier::PyrightEnumeration,
+            Barrier::TypeScript {
+                version: "5.9.3".into(),
+                tsserver_js: "/r/tsserver.js".into(),
+            },
+        ] {
+            let mut g = Gate::new(barrier.clone());
+            assert!(g.on(&Signal::Initialized).is_empty(), "{barrier:?}");
+            assert_eq!(g.state(), &State::Closed, "{barrier:?}");
+        }
     }
 
     #[test]

@@ -834,6 +834,7 @@ impl Workspace {
             guard_pyright_log_level: lang == Lang::Python,
             scope: ChildScope::Slot,
             project_root: Some(root.to_path_buf()),
+            pull_diagnostics: res.pull_diagnostics,
         };
         let child_in = Arc::new(Queue::single(QUEUE_CAP));
         let filter = Arc::new(Mutex::new(ServerFilter::default()));
@@ -1023,19 +1024,23 @@ impl Workspace {
             .filter(|uri| self.root_of(uri).as_ref() == Ok(&root))
             .collect();
         let replay = self.documents.replay(|uri| mine.iter().any(|m| m == uri));
-        if let Some(s) = self.slots.get_mut(&slot) {
-            let waiting = match std::mem::replace(&mut s.phase, Phase::Live) {
-                Phase::Starting { waiting, .. } => waiting,
-                other => {
-                    s.phase = other;
-                    Vec::new()
-                }
-            };
-            s.outbox.push(notification("initialized"));
-            s.outbox
-                .extend(replay.iter().map(|m| m.to_string().into_bytes()));
-            s.outbox.extend(waiting);
-        }
+        let Some(s) = self.slots.get_mut(&slot) else {
+            return;
+        };
+        let waiting = match std::mem::replace(&mut s.phase, Phase::Live) {
+            Phase::Starting { waiting, .. } => waiting,
+            other => {
+                s.phase = other;
+                Vec::new()
+            }
+        };
+        // Through the slot's Core, so the gate hears `initialized` and each
+        // replayed document is pulled where the server needs it, once.
+        let mut sent = vec![notification("initialized")];
+        sent.extend(replay.iter().map(|m| m.to_string().into_bytes()));
+        sent.extend(waiting);
+        let actions = s.core.started(sent, Instant::now());
+        self.apply(slot, actions);
     }
 
     fn step_slot(&mut self, slot: u64, input: Input) {
@@ -1559,6 +1564,12 @@ fn slot_reader(
                 }
             }
             Kind::Response => match s.id.clone() {
+                // A diagnostic pull's answer goes to the slot's Core, ahead
+                // of the lifecycle replies.
+                Some(id) if core::is_pull_id(&id) => {
+                    let body = forward.take().expect("set above");
+                    emit(SlotEvent::Input(Input::PullReply { id, body }));
+                }
                 Some(id) if route::is_own(&id) => {
                     let body = forward.take().expect("set above");
                     emit(SlotEvent::OwnReply(id, body));
