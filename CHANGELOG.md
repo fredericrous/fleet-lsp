@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.0
+
 - A TypeScript project whose lockfile pins `@effect/tsgo` is served by its
   own `effect-tsgo tsc --lsp --stdio` instead of typescript-language-server,
   so the agent sees the Effect rules exactly as `effect-tsgo tsc` reports them
@@ -16,6 +18,10 @@
   top level or after a command) prints the help and exits 0
   (cli.help.help-and-version). An unknown flag alone still exits 2, and
   `--help` after `--` is an operand, not a request for help.
+- The plugin requires fleet-lsp 0.6.0. Rolling back to 0.5.6: point the
+  marketplace at `ref: v0.5.6`, update the plugin, and put the 0.5.6 binary
+  first on PATH. No state to migrate.
+
 
 ## v0.5.6
 
