@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A TypeScript project whose lockfile pins `@effect/tsgo` is served by its
+  own `effect-tsgo tsc --lsp --stdio` instead of typescript-language-server,
+  so the agent sees the Effect rules exactly as `effect-tsgo tsc` reports them
+  in CI, `overrides` included. The wrapper, its platform package and the
+  compiler it selects are verified against the lockfile; doctor prints
+  `effect-tsgo <v> (typescript <c>, node <n>)`. effect-tsgo serves
+  diagnostics by pull only, so fleet-lsp pulls after each open and edit and
+  publishes the answers. Projects without `@effect/tsgo` are unchanged.
+- `scripts/lsp-probe.py` gains `--scenario`, `--pull`, `--diag-cap` and
+  `--open-also`.
 - `fleet-lsp --bogus --help` (an unknown flag beside `-h` or `--help`, at the
   top level or after a command) prints the help and exits 0
   (cli.help.help-and-version). An unknown flag alone still exits 2, and
