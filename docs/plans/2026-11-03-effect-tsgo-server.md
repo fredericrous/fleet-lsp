@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 branch: feat/effect-tsgo-server
 repos: [fleet-lsp]
 adrs: [ADR-0056, ADR-0044]
@@ -9,7 +9,7 @@ adrs: [ADR-0056, ADR-0044]
 ## Review panel
 
 👉 **Decide:** none — approve if a Phase 0 probe deciding push vs pull is the right first step before fleet-lsp launches effect-tsgo.
-📍 fleet-lsp · plan reviewed, nothing built · next: Phase 0 probe. Panel: backend, lang:rust, unix, tui (opus), codex (gpt, high).
+📍 fleet-lsp · plan reviewed and completed (0.6.0 released and verified). Panel: backend, lang:rust, unix, tui (opus), codex (gpt, high).
 **Changed by review:** Phase 0 probe gate (push vs pull, Loading trigger, harness changes); compiler identity and platform package verified; workspace-mode bridge and gate with freshness generations.
 📄 Full reviews: [2026-11-03-effect-tsgo-server.reviews.md](2026-11-03-effect-tsgo-server.reviews.md)
 **Verdicts:** round 1 four approve-with-changes; Codex rework, applied; backend approve-with-changes on the final body; 7 medium/low findings carried into implementation.
@@ -66,7 +66,7 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 - [x] Phase 0 — extend the probe harness before production code: add separate initialize-only, didOpen-without-query, and query-triggered scenarios, plus explicit textDocument/diagnostic requests and diagnostic collection that does not end on a successful references response. Record which scenario first triggers Loading, correlate diagnostics with the requested URI, and require an explicit diagnostic report to establish an empty result. Run the extended `scripts/lsp-probe.py` on customer-vision with a planted `Date.now()` in `app/lib/crm/domain.ts` (reverted after) must show whether a `globalDate` diagnostic is pushed for the opened file, and that `worker/gtm-writeback.test.ts` gets none, pushed or pulled; records whether `Loading` starts at spawn or on `didOpen`, and its rounds. Its answer picks Behaviour 3's gate trigger and Behaviour 4's push-or-pull branch.
 - [x] Phase 1 — `lockfile_version` scoped names, the effect-tsgo selection path, the platform-package check, `Barrier::Tsgo`, the pull bridge if Phase 0 needs it, doctor strings; unit tests.
 - [x] Phase 2a — integration tests, README, CHANGELOG, readiness row.
-- [ ] Phase 2b — plugin min-version and release 0.6.0; install it here (rollback: reinstall 0.5.6 through brew; no state to migrate); verify in Claude Code on customer-vision.
+- [x] Phase 2b — plugin min-version and release 0.6.0; binary installed here through brew (rollback: reinstall 0.5.6 through brew; no state to migrate); verified in Claude Code on customer-vision. Updating the local plugin cache is the person's action.
 
 ## Verification
 
@@ -98,7 +98,7 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 | `fleet-lsp doctor` on customer-vision | `typescript verified effect-tsgo 0.64.1` | `typescript verified effect-tsgo 0.64.1 (typescript 7.0.2, node 24.14.0)`, `pin: pnpm-lock.yaml @effect/tsgo 0.64.1`, no note |
 | repositories without `@effect/tsgo` (duro-app, website-builder, social-planner) | doctor unchanged | byte-identical to 0.5.6 |
 | no orphan | no effect-tsgo process left | after EOF: none (exit 0.065 s); after SIGKILL of fleet-lsp's group: none at +1/+3/+6 s; `effect-tsgo` hands over to the native `tsc`, which is fleet-lsp's direct child and group leader, and a `kill -9` of it leaves none while fleet-lsp stays up |
-| Claude Code on customer-vision | the planted `globalDate` shows, the test file shows none | Phase 2b, after the release |
+| Claude Code on customer-vision | the planted `globalDate` shows, the test file shows none | see Phase 2b below |
 
 **Phase 0 (observed 2026-11-03, effect-tsgo 0.64.1 on customer-vision, `scripts/lsp-probe.py` extended with `--scenario`, `--pull`, `--diag-cap`, `--open-also`):**
 
@@ -114,6 +114,13 @@ In a TypeScript project whose lockfile pins `@effect/tsgo`, fleet-lsp launches t
 - **Diagnostics are pull-only**: effect-tsgo pushes nothing for opened files, advertised or not, and answers pulls with the plugin's rules and `overrides` applied. Behaviour 4's pull bridge is built.
 
 
+**Phase 2b (observed 2026-11-05):**
+
+- PR #30 merged as `71a7d4dc688055fbb352bb539ab6d3ff59f28af3`; tag `v0.6.0` names that commit. Release run 42033371136 concluded success: all four build targets, archives published with `SHA256SUMS`, the tap, brew verification and the release branch.
+- Local `brew upgrade` and `brew test` passed for 0.6.0. `fleet-lsp doctor` in customer-vision resolves effect-tsgo 0.64.1 / TypeScript 7.0.2 / Node 24.14.0.
+- Claude Code LSP on customer-vision: `workspaceSymbol isClosedStage` succeeded cold; `findReferences` returned 8 references; `goToDefinition` from `CrmRepo.server.ts:546` went to `domain.ts`. A temporary `Date.now()` in the clean `customer-vision-wt-effect-tsgo` worktree produced the native client diagnostic `effect(globalDate)`, code 377066, at `domain.ts:11:40`; the plant was removed and `git diff --exit-code` passed. The client opened `worker/gtm-writeback.test.ts` and symbol lookup succeeded with no new reported diagnostics. Silence is not proof of zero, so a supplementary run through the installed `/usr/local/bin/fleet-lsp serve typescript` with `scripts/lsp-probe.py` explicitly published zero diagnostics for both the restored `domain.ts` and `worker/gtm-writeback.test.ts`, and exited 0.064 s after EOF (transcript: `/private/tmp/claude-501/-Users-fredericrous-Developer-Perso/67e8d0f4-5e22-4960-9f39-bb02c0d033cd/tasks/fleet-060-diagnostics.jsonl`).
+- The published plugin manifest and release branch are 0.6.0, but the installed user-scope plugin cache is still 0.5.3; that existing plugin launched the upgraded 0.6.0 binary successfully. Updating or reinstalling the local plugin remains the person's action.
+
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,lang:rust,unix,tui,codex body-sha=3c689ace007f -->
 
 ## Implementation review
@@ -122,3 +129,9 @@ approve on the final tree, after round 1 (approve-with-changes: 5 blocking rule 
 Fixed: output parameters, DocEvent and Diagnostics enums, banners, swallowed results, placeholder names, the plan record; a real `initialized`-without-params bug found end to end; process groups signalled at every kill site with kill(1) failures logged; root-only pin; closed files cleared while a server is down; pull errors logged; pending pulls keep a slot busy.
 deliberate: a server whose child ignores SIGTERM can hold the workspace loop up to `STOP_GRACE` (1 s) before SIGKILL (backend, rust, unix, implementation, low): bounded, and the normal case returns at once; no test drives the self-exit SIGKILL escalation with a TERM-ignoring grandchild (backend, low): the real server's self-exit was checked by hand above.
 Tokens: implementation 116k → 174k; backend 114k → 159k; lang:rust 94k → 135k; unix 80k → 125k.
+
+**Release-record review (2026-11-05):**
+- approve — implementation: clarified the checked Phase 2b line distinguishes the installed binary from the person's plugin update; 65k tokens, 27 s.
+- approve — backend: no findings in the generated pack and final verification delta; 51k tokens, 18 s.
+- approve — lang:rust: no Rust-code changes or findings; 59k tokens, 15 s.
+- approve — unix: no interface, stream or teardown changes in this delta; 63k tokens, 18 s.
