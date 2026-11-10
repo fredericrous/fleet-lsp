@@ -1220,10 +1220,10 @@ fn workspace_refusals_name_their_repository_and_spare_the_others() {
     let mut s = ws.start(&[], "python");
     s.symbol(1);
     let none = s.answer(1, ANSWER);
+    // A session outside any repository says so, instead of the generic
+    // "no repository chosen yet": its warm start failed for that reason.
     assert!(
-        none.contains(
-            "fleet-lsp: python: no repository chosen yet; fix: open a file of the repository first"
-        ),
+        none.contains("is in no git repository; fix: open a file inside a repository"),
         "{none}"
     );
     s.definition(2, &c.join("x.py"));
@@ -1703,6 +1703,85 @@ fn a_refused_session_repository_still_initializes() {
         refused.contains(&format!("fleet-lsp: python: {}: ", c.display())),
         "{refused}"
     );
+}
+
+/// A git repository with no python project in it.
+fn bare_repo(dir: &Path) {
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::write(dir.join("README.md"), "no python here\n").unwrap();
+}
+
+/// FALSIFY: drop the `warm_failure` fallback in `request`.
+#[test]
+fn a_request_with_no_document_names_why_the_session_repository_did_not_start() {
+    let _light = light();
+    let ws = Workspace::new("no-document-reason");
+    let bare = ws.dir.join("bare");
+    bare_repo(&bare);
+    let mut s = ws.start_at(&bare, &[], "python");
+    assert!(ws.log_has(&bare, "python", "warm start of", ANSWER));
+    s.symbol(1);
+    let refused = s.answer(1, ANSWER);
+    assert!(refused.contains("no python project found"), "{refused}");
+    assert!(!refused.contains("no repository chosen yet"), "{refused}");
+}
+
+/// FALSIFY: drop the save in the first `Err` arm of `warm_start`, the one a
+/// session outside any repository fails in (`root_of_dir`).
+#[test]
+fn a_session_outside_any_repository_says_so_to_a_request_with_no_document() {
+    let _light = light();
+    let ws = Workspace::new("no-document-no-repo");
+    let mut s = ws.start(&[], "python");
+    assert!(ws.log_has(&ws.dir, "python", "warm start of", ANSWER));
+    s.symbol(1);
+    let refused = s.answer(1, ANSWER);
+    assert!(refused.contains("is in no git repository"), "{refused}");
+    assert!(!refused.contains("no repository chosen yet"), "{refused}");
+}
+
+/// No FALSIFY: a `didOpen` seeds `recent`, which the fallback never consults.
+#[test]
+fn a_document_opened_after_a_refused_warm_start_routes_the_next_request() {
+    let _light = light();
+    let ws = Workspace::new("no-document-then-open");
+    let bare = ws.dir.join("bare");
+    bare_repo(&bare);
+    let good = ws.python("good", &[]);
+    let mut s = ws.start_at(&bare, &[], "python");
+    assert!(ws.log_has(&bare, "python", "warm start of", ANSWER));
+    s.open(&good.join("x.py"), "python");
+    s.symbol(2);
+    assert!(answered_by(&s.answer(2, ANSWER), &good));
+}
+
+/// FALSIFY: drop the `warm_failure` clears in `request` and `document`.
+#[test]
+fn a_stale_warm_start_reason_is_not_replayed_after_the_used_root_is_gone() {
+    let _light = light();
+    let ws = Workspace::new("no-document-stale");
+    let bare = ws.dir.join("bare");
+    bare_repo(&bare);
+    let good = ws.python("good", &[]);
+    let mut s = ws.start_at(&bare, &[], "python");
+    assert!(ws.log_has(&bare, "python", "warm start of", ANSWER));
+    s.definition(1, &good.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &good));
+    let pid = pids(&good.join("events.log"))[0];
+    fs::remove_dir_all(&good).unwrap();
+    assert!(
+        gone_within(pid, Duration::from_secs(10)),
+        "the child outlived its root"
+    );
+    assert!(ws.log_has(
+        &bare,
+        "python",
+        "its project root no longer exists",
+        Duration::from_secs(5)
+    ));
+    s.symbol(3);
+    let refused = s.answer(3, ANSWER);
+    assert!(!refused.contains("no python project"), "{refused}");
 }
 
 #[test]

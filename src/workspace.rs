@@ -217,6 +217,12 @@ struct Workspace {
     recent: Recent<PathBuf>,
     /// Why `recent` points where it does, named in the log.
     recent_reason: &'static str,
+    /// Why the session root's project did not start, kept so a request with
+    /// no document can say it. It speaks only while no project has been used
+    /// since: it is cleared whenever `recent` gains a root, because the sweep
+    /// can later empty `recent` again without naming a gone root, and the
+    /// old reason would then tell an agent to stop when opening a file works.
+    warm_failure: Option<String>,
     /// Client request id → the slot it went to, for `$/cancelRequest`.
     client_ids: HashMap<Id, u64>,
     next_slot: u64,
@@ -254,6 +260,7 @@ impl Workspace {
             documents: Documents::default(),
             recent: Recent::default(),
             recent_reason: "most recently used",
+            warm_failure: None,
             client_ids: HashMap::new(),
             next_slot: 1,
             next_own: 1,
@@ -389,6 +396,7 @@ impl Workspace {
             Err(text) => {
                 self.log
                     .line(&format!("warm start of {} failed: {text}", tilde(&dir)));
+                self.warm_failure = Some(text);
                 return;
             }
         };
@@ -398,9 +406,11 @@ impl Workspace {
                 self.recent_reason = "the session repository";
                 self.log.line(&format!("first project {}", tilde(&root)));
             }
-            Err(text) => self
-                .log
-                .line(&format!("warm start of {} failed: {text}", tilde(&root))),
+            Err(text) => {
+                self.log
+                    .line(&format!("warm start of {} failed: {text}", tilde(&root)));
+                self.warm_failure = Some(text);
+            }
         }
     }
 
@@ -432,13 +442,20 @@ impl Workspace {
                 }
                 latest.ok_or_else(|| match gone {
                     Some(root) => refusal::root_gone(self.lang(), &tilde(&root)),
-                    None => refusal::no_document(self.lang()),
+                    // The session root's own refusal says why nothing was
+                    // chosen ("no python project found in <repo>"); the
+                    // generic text is for a session whose warm start never ran.
+                    None => self
+                        .warm_failure
+                        .clone()
+                        .unwrap_or_else(|| refusal::no_document(self.lang())),
                 })
             }
         };
         let slot = root.and_then(|root| {
             let slot = self.slot_for(&root)?;
             self.recent.touch(&root);
+            self.warm_failure = None;
             self.recent_reason = "most recently used";
             Ok(slot)
         });
@@ -474,6 +491,7 @@ impl Workspace {
         // `workspace/symbol`, so opening in it leaves `recent` where it was.
         if method == "textDocument/didOpen" && !self.root_is_closed(&root) {
             self.recent.touch(&root);
+            self.warm_failure = None;
             self.recent_reason = "most recently opened";
         }
         // An idle-stopped root starts again for an open or an edit (not a
