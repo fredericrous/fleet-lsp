@@ -1716,17 +1716,18 @@ fn bare_repo(dir: &Path) {
 fn a_request_with_no_document_names_why_the_session_repository_did_not_start() {
     let _light = light();
     let ws = Workspace::new("no-document-reason");
-    let n = ws.dir.join("n");
-    bare_repo(&n);
-    let mut s = ws.start_at(&n, &[], "python");
-    assert!(ws.log_has(&n, "python", "warm start of", ANSWER));
+    let bare = ws.dir.join("bare");
+    bare_repo(&bare);
+    let mut s = ws.start_at(&bare, &[], "python");
+    assert!(ws.log_has(&bare, "python", "warm start of", ANSWER));
     s.symbol(1);
     let refused = s.answer(1, ANSWER);
     assert!(refused.contains("no python project found"), "{refused}");
     assert!(!refused.contains("no repository chosen yet"), "{refused}");
 }
 
-/// FALSIFY: save only the second `Err` arm of `warm_start`.
+/// FALSIFY: drop the save in the first `Err` arm of `warm_start`, the one a
+/// session outside any repository fails in (`root_of_dir`).
 #[test]
 fn a_session_outside_any_repository_says_so_to_a_request_with_no_document() {
     let _light = light();
@@ -1744,14 +1745,43 @@ fn a_session_outside_any_repository_says_so_to_a_request_with_no_document() {
 fn a_document_opened_after_a_refused_warm_start_routes_the_next_request() {
     let _light = light();
     let ws = Workspace::new("no-document-then-open");
-    let n = ws.dir.join("n");
-    bare_repo(&n);
-    let a = ws.python("a", &[]);
-    let mut s = ws.start_at(&n, &[], "python");
-    assert!(ws.log_has(&n, "python", "warm start of", ANSWER));
-    s.open(&a.join("x.py"), "python");
+    let bare = ws.dir.join("bare");
+    bare_repo(&bare);
+    let good = ws.python("good", &[]);
+    let mut s = ws.start_at(&bare, &[], "python");
+    assert!(ws.log_has(&bare, "python", "warm start of", ANSWER));
+    s.open(&good.join("x.py"), "python");
     s.symbol(2);
-    assert!(answered_by(&s.answer(2, ANSWER), &a));
+    assert!(answered_by(&s.answer(2, ANSWER), &good));
+}
+
+/// FALSIFY: drop the `warm_failure` clears in `request` and `document`.
+#[test]
+fn a_stale_warm_start_reason_is_not_replayed_after_the_used_root_is_gone() {
+    let _light = light();
+    let ws = Workspace::new("no-document-stale");
+    let bare = ws.dir.join("bare");
+    bare_repo(&bare);
+    let good = ws.python("good", &[]);
+    let mut s = ws.start_at(&bare, &[], "python");
+    assert!(ws.log_has(&bare, "python", "warm start of", ANSWER));
+    s.definition(1, &good.join("x.py"));
+    assert!(answered_by(&s.answer(1, ANSWER), &good));
+    let pid = pids(&good.join("events.log"))[0];
+    fs::remove_dir_all(&good).unwrap();
+    assert!(
+        gone_within(pid, Duration::from_secs(10)),
+        "the child outlived its root"
+    );
+    assert!(ws.log_has(
+        &bare,
+        "python",
+        "its project root no longer exists",
+        Duration::from_secs(5)
+    ));
+    s.symbol(3);
+    let refused = s.answer(3, ANSWER);
+    assert!(!refused.contains("no python project"), "{refused}");
 }
 
 #[test]

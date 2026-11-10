@@ -218,8 +218,10 @@ struct Workspace {
     /// Why `recent` points where it does, named in the log.
     recent_reason: &'static str,
     /// Why the session root's project did not start, kept so a request with
-    /// no document can say it. Never cleared: it is read only while `recent`
-    /// is empty and no root is gone, and a `didOpen` fills `recent`.
+    /// no document can say it. It speaks only while no project has been used
+    /// since: it is cleared whenever `recent` gains a root, because the sweep
+    /// can later empty `recent` again without naming a gone root, and the
+    /// old reason would then tell an agent to stop when opening a file works.
     warm_failure: Option<String>,
     /// Client request id → the slot it went to, for `$/cancelRequest`.
     client_ids: HashMap<Id, u64>,
@@ -453,6 +455,7 @@ impl Workspace {
         let slot = root.and_then(|root| {
             let slot = self.slot_for(&root)?;
             self.recent.touch(&root);
+            self.warm_failure = None;
             self.recent_reason = "most recently used";
             Ok(slot)
         });
@@ -488,6 +491,7 @@ impl Workspace {
         // `workspace/symbol`, so opening in it leaves `recent` where it was.
         if method == "textDocument/didOpen" && !self.root_is_closed(&root) {
             self.recent.touch(&root);
+            self.warm_failure = None;
             self.recent_reason = "most recently opened";
         }
         // An idle-stopped root starts again for an open or an edit (not a
