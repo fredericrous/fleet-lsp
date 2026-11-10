@@ -1705,6 +1705,55 @@ fn a_refused_session_repository_still_initializes() {
     );
 }
 
+/// A git repository with no python project in it.
+fn bare_repo(dir: &Path) {
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::write(dir.join("README.md"), "no python here\n").unwrap();
+}
+
+/// FALSIFY: drop the `warm_failure` fallback in `request`.
+#[test]
+fn a_request_with_no_document_names_why_the_session_repository_did_not_start() {
+    let _light = light();
+    let ws = Workspace::new("no-document-reason");
+    let n = ws.dir.join("n");
+    bare_repo(&n);
+    let mut s = ws.start_at(&n, &[], "python");
+    assert!(ws.log_has(&n, "python", "warm start of", ANSWER));
+    s.symbol(1);
+    let refused = s.answer(1, ANSWER);
+    assert!(refused.contains("no python project found"), "{refused}");
+    assert!(!refused.contains("no repository chosen yet"), "{refused}");
+}
+
+/// FALSIFY: save only the second `Err` arm of `warm_start`.
+#[test]
+fn a_session_outside_any_repository_says_so_to_a_request_with_no_document() {
+    let _light = light();
+    let ws = Workspace::new("no-document-no-repo");
+    let mut s = ws.start(&[], "python");
+    assert!(ws.log_has(&ws.dir, "python", "warm start of", ANSWER));
+    s.symbol(1);
+    let refused = s.answer(1, ANSWER);
+    assert!(refused.contains("is in no git repository"), "{refused}");
+    assert!(!refused.contains("no repository chosen yet"), "{refused}");
+}
+
+/// No FALSIFY: a `didOpen` seeds `recent`, which the fallback never consults.
+#[test]
+fn a_document_opened_after_a_refused_warm_start_routes_the_next_request() {
+    let _light = light();
+    let ws = Workspace::new("no-document-then-open");
+    let n = ws.dir.join("n");
+    bare_repo(&n);
+    let a = ws.python("a", &[]);
+    let mut s = ws.start_at(&n, &[], "python");
+    assert!(ws.log_has(&n, "python", "warm start of", ANSWER));
+    s.open(&a.join("x.py"), "python");
+    s.symbol(2);
+    assert!(answered_by(&s.answer(2, ANSWER), &a));
+}
+
 #[test]
 fn the_workspace_header_names_the_mode_and_the_session_root() {
     let _light = light();
