@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.6.2
+
+- The session note tells an agent whose LSP tool is only named as a deferred
+  tool to load it first with `ToolSearch select:LSP`. Explore, general-purpose
+  and fork subagents inherit their tools, get LSP deferred, and made no LSP
+  call before this. The plugin requires fleet-lsp 0.6.2. Rolling back to
+  0.6.1: point the marketplace at `ref: v0.6.1`, update the plugin, and put the
+  0.6.1 binary first on PATH. No state to migrate.
+
 ## v0.6.1
 
 - A request with no document (`workspace/symbol`) now says why the session
