@@ -11,7 +11,7 @@
 command -v fleet-lsp >/dev/null 2>&1 || exit 0
 guidance() {
 	cat <<'TXT'
-Code intelligence (fleet-lsp, .rs .go .py .ts/.js), wherever the LSP tool is available:
+Code intelligence (fleet-lsp, .rs .go .py .ts/.js), wherever the LSP tool is available (named only as a deferred tool? load it first: ToolSearch select:LSP):
 - Navigate with the LSP tool, not grep/rg/cat or a whole-file Read: workspaceSymbol to find a name, then goToDefinition, findReferences, hover, incomingCalls; Read only the range LSP points to. Grep/Glob are for text: comments, strings, config.
 - Before a rename or a signature change: findReferences for the call sites, then Grep for what LSP cannot see (strings, docs, dynamic calls).
 - After an edit, diagnostics arrive on their own: fix each type error or missing import before moving on.
