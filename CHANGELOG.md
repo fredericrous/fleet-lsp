@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.6.1
+
+- A request with no document (`workspace/symbol`) now says why the session
+  root's project did not start, instead of the generic "no repository chosen
+  yet": `no python project found in <repo>; fix: none` for a repository with no
+  project of that language, `<dir> is in no git repository` for a session
+  outside any repository. The reason is dropped as soon as a project is used,
+  so a deleted worktree cannot replay it. The session note now tells an agent
+  to open a file first when its session did not start in a repository.
+  The plugin requires fleet-lsp 0.6.1. Rolling back to 0.6.0: point the
+  marketplace at `ref: v0.6.0`, update the plugin, and put the 0.6.0 binary
+  first on PATH. No state to migrate.
+
 ## v0.6.0
 
 - A TypeScript project whose lockfile pins `@effect/tsgo` is served by its
