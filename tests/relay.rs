@@ -1220,10 +1220,10 @@ fn workspace_refusals_name_their_repository_and_spare_the_others() {
     let mut s = ws.start(&[], "python");
     s.symbol(1);
     let none = s.answer(1, ANSWER);
+    // A session outside any repository says so, instead of the generic
+    // "no repository chosen yet": its warm start failed for that reason.
     assert!(
-        none.contains(
-            "fleet-lsp: python: no repository chosen yet; fix: open a file of the repository first"
-        ),
+        none.contains("is in no git repository; fix: open a file inside a repository"),
         "{none}"
     );
     s.definition(2, &c.join("x.py"));
