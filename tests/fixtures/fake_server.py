@@ -16,6 +16,9 @@ FAKE_SLOW_READ    read stdin at this many bytes per second
 FAKE_FLOOD_MIB    after `initialized`, send this many MiB of diagnostics
                   (event `flooding` when it starts)
 FAKE_FLOOD_FRAME  size of each diagnostics frame in bytes (default 1 MiB)
+FAKE_DIAGNOSTICS  "<n>:<pad>": after `initialized`, push n diagnostics for one
+                  file, then 5 for another (see push_diagnostics)
+FAKE_PULL_EXTRA   tsgo: this many more items in each pull answer
 FAKE_EXIT_AFTER   exit on its own this many seconds after `initialized`
 FAKE_FLAVOR=ra    behave like rust-analyzer instead: readiness is
                   `experimental/serverStatus` quiescent, with
@@ -129,6 +132,26 @@ def flood():
     event("flooded", str(i))
 
 
+def diagnostic(i, severity, pad):
+    return {"range": {"start": {"line": i, "character": 0}, "end": {"line": i, "character": 1}},
+            "severity": severity, "source": "fake", "message": f"fake {i} " + "m" * pad}
+
+
+def push_diagnostics(spec):
+    # "<n>:<pad>": one push of n diagnostics for file:///many.rs, warnings
+    # first then errors, each message padded by <pad> bytes; then a 5-item
+    # push for file:///few.rs, sent with `uri` before `diagnostics` so a
+    # frame forwarded unchanged is told apart from a re-serialised one.
+    n, pad = (int(x) for x in spec.split(":"))
+    many = [diagnostic(i, 2 if i < n // 2 else 1, pad) for i in range(n)]
+    send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+          "params": {"uri": "file:///many.rs", "diagnostics": many}})
+    few = [diagnostic(i, 1, 0) for i in range(5)]
+    send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+          "params": {"uri": "file:///few.rs", "diagnostics": few}})
+    event("pushed-diagnostics", str(n))
+
+
 def become_ready(delay):
     if os.environ.get("FAKE_FLAVOR") == "ra":
         send({"jsonrpc": "2.0", "method": "experimental/serverStatus",
@@ -219,6 +242,8 @@ def main():
                 threading.Thread(target=lambda: (time.sleep(t), event("self-exit"), os._exit(3)), daemon=True).start()
             if os.environ.get("FAKE_FLOOD_MIB"):
                 threading.Thread(target=flood, daemon=True).start()
+            if os.environ.get("FAKE_DIAGNOSTICS"):
+                push_diagnostics(os.environ["FAKE_DIAGNOSTICS"])
             if os.environ.get("FAKE_CONFIG_FIRST"):
                 send({"jsonrpc": "2.0", "id": config_id, "method": "workspace/configuration",
                       "params": {"items": [{"section": "python.analysis"}]}})
@@ -253,10 +278,12 @@ def main():
         elif method == "textDocument/diagnostic" and TSGO:
             uri = ((m.get("params") or {}).get("textDocument") or {}).get("uri")
             event("pull", str(uri))
-            send({"jsonrpc": "2.0", "id": mid, "result": {"kind": "full", "items": [{
+            items = [{
                 "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
                 "severity": 1, "code": 377066, "source": "effect",
-                "message": f"fake diagnostic for {uri} from {os.getcwd()}"}]}})
+                "message": f"fake diagnostic for {uri} from {os.getcwd()}"}]
+            items += [diagnostic(i, 1, 0) for i in range(int(os.environ.get("FAKE_PULL_EXTRA", "0")))]
+            send({"jsonrpc": "2.0", "id": mid, "result": {"kind": "full", "items": items}})
         elif method == "shutdown":
             shutdown = True
             event("shutdown")

@@ -717,7 +717,23 @@ impl Core {
             return Vec::new();
         };
         match diagnostic_report(body) {
-            Report::Full(items) => vec![Action::ToClient(publish(&pull.uri, items))],
+            Report::Full(items) => {
+                let mut out = Vec::new();
+                let items = match items.as_arr().and_then(|a| cap_diagnostics(a, &pull.uri)) {
+                    Some((capped, dropped)) => {
+                        if dropped > 0 {
+                            out.push(Action::Log(format!(
+                                "diagnostics of {} capped: {dropped} dropped",
+                                pull.uri
+                            )));
+                        }
+                        capped
+                    }
+                    None => items,
+                };
+                out.push(Action::ToClient(publish(&pull.uri, items)));
+                out
+            }
             // The client keeps the set it was last sent.
             Report::Unchanged => Vec::new(),
             Report::Error { code, message } => vec![Action::Log(format!(
@@ -972,6 +988,174 @@ pub(crate) fn publish(uri: &str, items: Json) -> Vec<u8> {
         )
         .to_string()
         .into_bytes()
+}
+
+/// The most diagnostics one file sends the client, its summary not counted.
+pub(crate) const DIAGNOSTICS_PER_FILE: usize = 20;
+/// The most bytes one file's serialised diagnostics array takes, its summary
+/// counted: twenty diagnostics can still flood with huge messages.
+pub(crate) const DIAGNOSTICS_BYTES_PER_FILE: usize = 64 << 10;
+/// Room kept for the summary while filling the byte budget.
+const SUMMARY_RESERVE: usize = 512;
+
+/// Which of one file's diagnostics the client gets, from each one's
+/// severity (a missing one is an error) and serialised size: information and
+/// hints dropped, errors before warnings in their own order, at most
+/// [`DIAGNOSTICS_PER_FILE`] in [`DIAGNOSTICS_BYTES_PER_FILE`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Cut {
+    /// Indexes into the input, in the order to send.
+    pub(crate) kept: Vec<usize>,
+    /// Errors and warnings left out (information and hints not counted).
+    pub(crate) dropped: usize,
+    pub(crate) dropped_errors: usize,
+    /// The kept list is not the input as it came.
+    pub(crate) changed: bool,
+}
+
+pub(crate) fn cut(items: &[(i64, usize)]) -> Cut {
+    let mut order: Vec<usize> = (0..items.len()).filter(|&i| items[i].0 <= 2).collect();
+    let changed =
+        order.len() != items.len() || !order.windows(2).all(|w| items[w[0]].0 <= items[w[1]].0);
+    order.sort_by_key(|&i| items[i].0);
+    let mut kept = Vec::with_capacity(order.len().min(DIAGNOSTICS_PER_FILE));
+    let mut bytes = 2; // `[]`
+    let (mut dropped, mut dropped_errors) = (0, 0);
+    for i in order {
+        let (severity, len) = items[i];
+        if kept.len() < DIAGNOSTICS_PER_FILE
+            && bytes + len + 1 + SUMMARY_RESERVE <= DIAGNOSTICS_BYTES_PER_FILE
+        {
+            bytes += len + 1;
+            kept.push(i);
+        } else {
+            dropped += 1;
+            if severity <= 1 {
+                dropped_errors += 1;
+            }
+        }
+    }
+    Cut {
+        changed: changed || dropped > 0,
+        kept,
+        dropped,
+        dropped_errors,
+    }
+}
+
+fn severity_of(d: &Json) -> i64 {
+    match d.get("severity") {
+        Some(Json::Int(n)) => *n,
+        _ => 1,
+    }
+}
+
+/// `items`, one file's diagnostics, capped as [`cut`] says, with one last
+/// diagnostic for the ones it dropped. `None` when nothing changes; else the
+/// new array and how many errors and warnings it dropped.
+pub(crate) fn cap_diagnostics(items: &[Json], uri: &str) -> Option<(Json, usize)> {
+    let sized: Vec<(i64, usize)> = items
+        .iter()
+        .map(|d| (severity_of(d), d.to_string().len()))
+        .collect();
+    let c = cut(&sized);
+    if !c.changed {
+        return None;
+    }
+    let mut out: Vec<Json> = c.kept.iter().map(|&i| items[i].clone()).collect();
+    if c.dropped > 0 {
+        out.push(cap_summary(c.dropped, c.dropped_errors, uri));
+    }
+    Some((Json::Arr(out), c.dropped))
+}
+
+/// A server's `publishDiagnostics` frame, capped as [`cut`] says, without
+/// parsing it whole: a flood is one frame of up to `frame::MAX_FRAME`, and a
+/// tree of it would cost several times its size. The `diagnostics` array is
+/// found by byte spans (`crate::spans`), each element up to the byte budget
+/// is parsed alone for its severity (a larger one cannot be kept, and counts
+/// as an error), and the kept elements are spliced back byte for byte.
+/// `None` when nothing changes or the frame is not one this reads; else the
+/// new frame, its URI and how many errors and warnings it dropped.
+pub(crate) fn cap_published(body: &[u8]) -> Option<(Vec<u8>, String, usize)> {
+    use crate::spans;
+    let top = spans::members(body, spans::ws(body, 0))?;
+    let params = spans::member(body, &top, "params")?;
+    let fields = spans::members(body, params.start)?;
+    let uri = crate::scan::decode_string(&body[spans::member(body, &fields, "uri")?])?;
+    let array = spans::member(body, &fields, "diagnostics")?;
+    let elements = spans::elements(body, array.start)?;
+    let sized: Vec<(i64, usize)> = elements
+        .iter()
+        .map(|r| {
+            let severity = (r.len() <= DIAGNOSTICS_BYTES_PER_FILE)
+                .then(|| std::str::from_utf8(&body[r.clone()]).ok())
+                .flatten()
+                .and_then(|t| json::parse(t).ok())
+                .map_or(1, |d| severity_of(&d));
+            (severity, r.len())
+        })
+        .collect();
+    let c = cut(&sized);
+    if !c.changed {
+        return None;
+    }
+    let mut out = Vec::with_capacity(array.start + DIAGNOSTICS_BYTES_PER_FILE + 64);
+    out.extend_from_slice(&body[..array.start]);
+    out.push(b'[');
+    for (n, &i) in c.kept.iter().enumerate() {
+        if n > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(&body[elements[i].clone()]);
+    }
+    if c.dropped > 0 {
+        if !c.kept.is_empty() {
+            out.push(b',');
+        }
+        out.extend_from_slice(
+            cap_summary(c.dropped, c.dropped_errors, &uri)
+                .to_string()
+                .as_bytes(),
+        );
+    }
+    out.push(b']');
+    out.extend_from_slice(&body[array.end..]);
+    Some((out, uri, c.dropped))
+}
+
+/// The diagnostic that stands for the `dropped` ones the cap removed.
+fn cap_summary(dropped: usize, errors: usize, uri: &str) -> Json {
+    let errors = match errors {
+        0 => String::new(),
+        1 => " (1 error)".to_string(),
+        n => format!(" ({n} errors)"),
+    };
+    let path = uri.rsplit('/').next().unwrap_or("");
+    let check = match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("rs") => "cargo check",
+        Some("go") => "go vet ./...",
+        Some("py" | "pyi") => "pyright",
+        _ => "npx tsc --noEmit",
+    };
+    let at = Json::obj().set("line", 0i64).set("character", 0i64);
+    Json::obj()
+        .set("range", Json::obj().set("start", at.clone()).set("end", at))
+        .set("severity", 2i64)
+        .set("source", "fleet-lsp")
+        .set(
+            "message",
+            format!(
+                "{dropped} more {}{errors} not shown: fleet-lsp keeps at most \
+                 {DIAGNOSTICS_PER_FILE} ({} KiB) per file; for the full list run `{check}`",
+                if dropped == 1 {
+                    "diagnostic"
+                } else {
+                    "diagnostics"
+                },
+                DIAGNOSTICS_BYTES_PER_FILE >> 10
+            ),
+        )
 }
 
 /// The event and document of a `didOpen`, `didChange` or `didClose`.
@@ -1984,5 +2168,106 @@ mod tests {
         assert!(!c.is_quiet(), "an idle stop would cut the pull");
         c.step(full(&a1, "done"), t);
         assert!(c.is_quiet());
+    }
+
+    // ------------------------------------------------------- diagnostic cap
+
+    fn diag(severity: Option<i64>, message: &str) -> Json {
+        Json::obj()
+            .set_opt("severity", severity)
+            .set("message", message)
+    }
+
+    fn capped(items: &[Json], uri: &str) -> Option<(Vec<Json>, usize)> {
+        cap_diagnostics(items, uri).map(|(arr, n)| (arr.as_arr().expect("an array").to_vec(), n))
+    }
+
+    fn message(d: &Json) -> &str {
+        d.get("message").and_then(Json::as_str).unwrap_or("")
+    }
+
+    /// FALSIFY: raise `DIAGNOSTICS_PER_FILE` past 50.
+    #[test]
+    fn fifty_errors_keep_twenty_and_a_summary() {
+        let items: Vec<Json> = (0..50).map(|i| diag(Some(1), &format!("e{i}"))).collect();
+        let (out, dropped) = capped(&items, "file:///a/b.rs").expect("capped");
+        assert_eq!(dropped, 30);
+        assert_eq!(out.len(), 21);
+        assert_eq!(message(&out[0]), "e0", "order kept");
+        let summary = message(&out[20]);
+        assert!(
+            summary.starts_with("30 more diagnostics (30 errors) not shown"),
+            "{summary}"
+        );
+        assert!(summary.ends_with("run `cargo check`"), "{summary}");
+        assert_eq!(
+            out[20].get("source").and_then(Json::as_str),
+            Some("fleet-lsp")
+        );
+    }
+
+    #[test]
+    fn hints_and_information_go_without_a_summary() {
+        let mut items: Vec<Json> = (0..5).map(|_| diag(Some(4), "hint")).collect();
+        items.push(diag(Some(3), "info"));
+        items.extend((0..3).map(|i| diag(Some(2), &format!("w{i}"))));
+        let (out, dropped) = capped(&items, "file:///x.py").expect("filtered");
+        assert_eq!(dropped, 0);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|d| message(d).starts_with('w')));
+    }
+
+    #[test]
+    fn errors_come_before_warnings_and_a_missing_severity_is_an_error() {
+        let items = vec![
+            diag(Some(2), "w0"),
+            diag(Some(1), "e0"),
+            diag(Some(2), "w1"),
+            diag(None, "e1"),
+        ];
+        let (out, _) = capped(&items, "file:///x.go").expect("reordered");
+        let order: Vec<&str> = out.iter().map(message).collect();
+        assert_eq!(order, ["e0", "e1", "w0", "w1"]);
+    }
+
+    #[test]
+    fn what_needs_no_cap_is_left_alone() {
+        let exactly: Vec<Json> = (0..20).map(|_| diag(Some(1), "e")).collect();
+        assert!(capped(&exactly, "file:///x.rs").is_none());
+        assert!(
+            capped(&[], "file:///x.rs").is_none(),
+            "a clear stays a clear"
+        );
+    }
+
+    #[test]
+    fn a_summary_of_warnings_names_no_errors_and_the_language_check() {
+        let mut items: Vec<Json> = (0..20).map(|_| diag(Some(1), "e")).collect();
+        items.push(diag(Some(2), "w"));
+        let (out, dropped) = capped(&items, "file:///x.ts").expect("capped");
+        assert_eq!(dropped, 1);
+        let summary = message(&out[20]);
+        assert!(
+            summary.starts_with("1 more diagnostic not shown"),
+            "{summary}"
+        );
+        assert!(summary.ends_with("run `npx tsc --noEmit`"), "{summary}");
+    }
+
+    /// FALSIFY: drop the byte test in `cap_diagnostics`.
+    #[test]
+    fn huge_messages_stay_inside_the_byte_budget() {
+        let big = "x".repeat(10 << 10);
+        let items: Vec<Json> = (0..20).map(|_| diag(Some(1), &big)).collect();
+        let (arr, dropped) = cap_diagnostics(&items, "file:///x.rs").expect("capped");
+        let text = arr.to_string();
+        assert!(
+            text.len() <= DIAGNOSTICS_BYTES_PER_FILE,
+            "{} bytes",
+            text.len()
+        );
+        assert!(crate::json::parse(&text).is_ok());
+        assert_eq!(dropped, 20 - (arr.as_arr().unwrap().len() - 1));
+        assert!(dropped > 0);
     }
 }

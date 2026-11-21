@@ -16,6 +16,7 @@ mod relay;
 mod resolve;
 mod route;
 mod scan;
+mod spans;
 mod workspace;
 
 use cli::{Command, Usage};
