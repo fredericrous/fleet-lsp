@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.7.0
+
+- The session note loads only where it serves. At session start it loads when
+  the session starts in a Rust, Go, Python or TypeScript project; otherwise
+  once, beside the first Read, Edit or Write of such a file, so a session
+  started above several repositories gets it when it first works on one. A
+  subagent whose definition gives it no `LSP` tool no longer gets it. The
+  hooks run `fleet-lsp hook <event>` (new) and log to
+  `~/.local/state/fleet-lsp/hook/<date>.log`.
+- Diagnostics are capped per file: at most 20 and 64 KiB reach the client,
+  errors before warnings, information and hints dropped, with one summary
+  diagnostic naming the check that lists them all.
+- The plugin requires fleet-lsp 0.7.0. Rolling back to 0.6.2: point the
+  marketplace at `ref: v0.6.2`, update the plugin, and put the 0.6.2 binary
+  first on PATH. Markers under `~/.local/state/fleet-lsp/guided/` can be
+  deleted.
+
 ## v0.6.2
 
 - The session note tells an agent whose LSP tool is only named as a deferred
