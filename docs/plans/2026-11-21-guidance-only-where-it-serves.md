@@ -94,6 +94,13 @@ Applied on both paths:
 - 2026-11-22 — the hooks.json-command checks against the real binary live in `tests/hook.rs`, not `scripts/check-plugin.sh`: CI's `deps` job runs the script without a Rust build. The script keeps the wiring checks and the old-binary/no-binary silence.
 - 2026-11-22 — deliberate: the p95 ≤ 20 ms bar is not met and the design stays. Measured on this host (load 25–50, debug build): `post-tool-use` with a marker p50 89 ms / p95 148 ms through the wrapper; `sh -c true` alone p50 38 / p95 56 ms, `fleet-lsp --version` alone p50 18 / p95 44 ms. The hook costs one shell plus one process start; the bar was set without a baseline.
 
+## Implementation review
+- implementation-review (opus): R1 approve-with-changes (swallowed claim error, banners, names) fixed; 3 deltas, last approve (55k/32 s, 95k/106 s, 108k/110 s, 30k/15 s).
+- backend (opus): R1 4 findings (unbounded hook.log, `.` fallback, untested guards) fixed; deltas approve (81k/72 s, 38k/34 s, 30k/14 s, 22k/10 s).
+- lang:rust (opus): R1 6 (Forward/ToolAccess enums, Capped, expect) fixed; deltas approve (72k/48 s, 35k/29 s, 29k/9 s, 22k/9 s).
+- unix (opus): R1 3 (marker kept on lost write, `hook -x`) fixed; delta approve (55k/24 s, 35k/22 s); deliberate: `hook --help` already prints help (`asks_for_help` runs first).
+- Next: release 0.7.0 (plugin.json version + 4× `--min-version`, CHANGELOG, tap), install, then the live session check below; then `status: done`.
+
 ## Verification record
 - `make check` parts: fmt, clippy `-D warnings`, `cargo test` (all suites, run by the commit gate), `check-no-deps.sh`, `check-plugin.sh` → all pass. Falsified: dropping `post-tool-use` from hooks.json fails `check-plugin.sh`.
 - Cap unit tests (`core::tests`): 50 errors → 20 + summary; hints/info → dropped, no summary; errors first; exactly 20 and empty → unchanged; 1 warning dropped → "1 more diagnostic not shown … `npx tsc --noEmit`"; huge messages → ≤ 64 KiB, valid JSON → pass.
