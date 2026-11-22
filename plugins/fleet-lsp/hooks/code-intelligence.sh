@@ -1,28 +1,11 @@
 #!/bin/sh
-# Session-start guidance: an index, one line per item (decisions ADR-0026,
-# guidance.always-on-is-an-index). The operations and their arguments are in
-# the LSP tool's own description, so they are not repeated here. Without the
-# binary every query fails, so the guidance would point at a dead tool.
-#
-# `code-intelligence.sh subagent` prints the same index for SubagentStart,
-# which takes context only as JSON: SessionStart reaches the main
-# conversation alone, and subagents (Explore, workers, reviewers) navigated
-# with whole-file Reads and shell grep without it.
+# The plugin's hooks: `code-intelligence.sh <session-start|post-tool-use|
+# subagent-start>`, the hook's JSON on stdin. `fleet-lsp hook` decides where
+# the guidance serves (a project of a served language, the first touch of
+# such a file, a subagent with the LSP tool) and prints it; this wrapper only
+# keeps a hook from ever failing the person's session. Without the binary
+# every LSP query fails, so there is no guidance to give; a binary older than
+# `hook` exits 2 here, and its silence is the right answer too. The binary
+# logs its own failures to $XDG_STATE_HOME/fleet-lsp/hook.log.
 command -v fleet-lsp >/dev/null 2>&1 || exit 0
-guidance() {
-	cat <<'TXT'
-Code intelligence (fleet-lsp, .rs .go .py .ts/.js), wherever the LSP tool is available (named only as a deferred tool? load it first: ToolSearch select:LSP):
-- Navigate with the LSP tool, not grep/rg/cat or a whole-file Read: workspaceSymbol to find a name, then goToDefinition, findReferences, hover, incomingCalls; Read only the range LSP points to. Grep/Glob are for text: comments, strings, config.
-- Before a rename or a signature change: findReferences for the call sites, then Grep for what LSP cannot see (strings, docs, dynamic calls).
-- After an edit, diagnostics arrive on their own: fix each type error or missing import before moving on.
-- Each repository you query gets its own server (worktrees included); workspaceSymbol searches the repository of the file opened or used most recently, so open a file (documentSymbol, hover) first when the session did not start in a repository.
-- A slow first answer is the server loading. An error that names a fix (`fleet-lsp doctor` explains it): apply the fix or tell the person; do not fall back to Grep without saying so.
-TXT
-}
-if [ "${1:-}" = subagent ]; then
-	# The text holds no control characters; escape \ and " and join the lines.
-	printf '{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"%s"}}\n' \
-		"$(guidance | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "\\n"} {printf "%s", $0}')"
-else
-	guidance
-fi
+fleet-lsp hook "$@" 2>/dev/null || exit 0

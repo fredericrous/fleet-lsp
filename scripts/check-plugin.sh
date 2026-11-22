@@ -16,22 +16,21 @@ t=$(grep -c '"requestTimeout": 400000' "$m" || true)
 s=$(grep -c '"startupTimeout": 210000' "$m" || true)
 [ "$s" = 1 ] || { echo "plugin.json sets the go startupTimeout 210000 $s times, want 1" >&2; fail=1; }
 grep -q 'DEFAULT_CEILING: Duration = Duration::from_secs(370)' src/relay.rs || { echo "ceiling is no longer 370 s: update requestTimeout" >&2; fail=1; }
-# The session-start guidance stays an index (ADR-0026): at most 6 lines.
+# The hooks: one wrapper, each event named on its command line. What
+# `fleet-lsp hook` prints for each is tested against the real binary in
+# tests/hook.rs; here, the wiring, and that the wrapper never fails a session.
 h=plugins/fleet-lsp/hooks/code-intelligence.sh
+j=plugins/fleet-lsp/hooks/hooks.json
 [ -x "$h" ] || { echo "$h is not executable" >&2; fail=1; }
-grep -q 'hooks/code-intelligence.sh' plugins/fleet-lsp/hooks/hooks.json || { echo "hooks.json does not run $h" >&2; fail=1; }
-stub=$(mktemp -d) && printf '#!/bin/sh\n' >"$stub/fleet-lsp" && chmod +x "$stub/fleet-lsp"
-l=$(PATH="$stub:$PATH" "$h" | wc -l | tr -d ' ')
-# Subagents get the same index, as the one-line JSON SubagentStart reads.
-grep -q 'hooks/code-intelligence.sh\\" subagent' plugins/fleet-lsp/hooks/hooks.json || { echo "hooks.json does not run $h subagent" >&2; fail=1; }
-j=$(PATH="$stub:$PATH" "$h" subagent)
-case "$j" in
-'{"hookSpecificOutput":{"hookEventName":"SubagentStart","additionalContext":"Code intelligence'*'"}}') ;;
-*) echo "$h subagent does not print SubagentStart context" >&2; fail=1 ;;
-esac
-[ "$(printf '%s\n' "$j" | wc -l | tr -d ' ')" = 1 ] || { echo "$h subagent prints more than one line" >&2; fail=1; }
+for e in session-start post-tool-use subagent-start; do
+	n=$(grep -cF 'hooks/code-intelligence.sh\" '"$e"'"' "$j" || true)
+	[ "$n" = 1 ] || { echo "hooks.json runs $h $e $n times, want 1" >&2; fail=1; }
+done
+grep -q '"matcher": "Read|Edit|Write|MultiEdit"' "$j" || { echo "hooks.json PostToolUse matcher is not Read|Edit|Write|MultiEdit" >&2; fail=1; }
+# A binary older than `hook` (it exits 2), and none at all: silent, exit 0.
+stub=$(mktemp -d) && printf '#!/bin/sh\necho usage >&2\nexit 2\n' >"$stub/fleet-lsp" && chmod +x "$stub/fleet-lsp"
+o=$(echo '{}' | PATH="$stub:$PATH" "$h" post-tool-use) && [ -z "$o" ] || { echo "$h is not silent with an old binary" >&2; fail=1; }
 rm -r "$stub"
-[ "$l" -ge 1 ] || { echo "$h prints nothing with fleet-lsp on PATH" >&2; fail=1; }
-[ "$l" -le 6 ] || { echo "$h prints $l lines, want at most 6" >&2; fail=1; }
+o=$(echo '{}' | PATH=/nonexistent /bin/sh "$h" session-start) && [ -z "$o" ] || { echo "$h is not silent without the binary" >&2; fail=1; }
 [ "$fail" = 0 ] && echo "plugin manifest matches $v"
 exit "$fail"
