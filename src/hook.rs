@@ -154,15 +154,15 @@ fn claim(path: &Path) -> io::Result<bool> {
 }
 
 fn prune_markers(dir: &Path, now: SystemTime) {
-    for f in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let old = f
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let old = entry
             .metadata()
-            .and_then(|m| m.modified())
+            .and_then(|metadata| metadata.modified())
             .ok()
-            .and_then(|t| now.duration_since(t).ok())
+            .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > MARKER_KEEP);
         if old {
-            let _ = fs::remove_file(f.path()); // best effort: the next claim prunes again
+            let _ = fs::remove_file(entry.path()); // best effort: the next claim prunes again
         }
     }
 }
@@ -364,8 +364,11 @@ fn front_matter(text: &str) -> Option<Vec<String>> {
 fn unquote(s: &str) -> &str {
     let s = s.trim();
     s.strip_prefix('"')
-        .and_then(|r| r.strip_suffix('"'))
-        .or_else(|| s.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| {
+            s.strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+        })
         .unwrap_or(s)
 }
 
@@ -387,10 +390,10 @@ enum ToolList {
 }
 
 fn list(front: &[String], key: &str) -> ToolList {
-    let Some(at) = front
-        .iter()
-        .position(|l| l.strip_prefix(key).is_some_and(|r| r.starts_with(':')))
-    else {
+    let Some(at) = front.iter().position(|l| {
+        l.strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with(':'))
+    }) else {
         return ToolList::Absent;
     };
     let inline = front[at][key.len() + 1..].trim();

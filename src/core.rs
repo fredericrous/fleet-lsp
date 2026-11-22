@@ -1098,9 +1098,9 @@ pub(crate) fn cap_published(body: &[u8]) -> Option<Capped> {
         .iter()
         .map(|r| {
             let severity = Some(&body[r.clone()])
-                .filter(|b| b.len() <= DIAGNOSTICS_BYTES_PER_FILE)
-                .and_then(|b| std::str::from_utf8(b).ok())
-                .and_then(|t| json::parse(t).ok())
+                .filter(|bytes| bytes.len() <= DIAGNOSTICS_BYTES_PER_FILE)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .and_then(|text| json::parse(text).ok())
                 .map_or(1, |diagnostic| severity_of(&diagnostic));
             (severity, r.len())
         })
@@ -2199,7 +2199,8 @@ mod tests {
     }
 
     fn capped(items: &[Json], uri: &str) -> Option<(Vec<Json>, usize)> {
-        cap_diagnostics(items, uri).map(|(arr, n)| (arr.as_arr().expect("an array").to_vec(), n))
+        cap_diagnostics(items, uri)
+            .map(|(arr, dropped)| (arr.as_arr().expect("an array").to_vec(), dropped))
     }
 
     fn message(diagnostic: &Json) -> &str {

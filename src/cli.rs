@@ -245,7 +245,8 @@ mod tests {
 
     #[test]
     fn hook_takes_one_known_event() {
-        let parse_words = |a: &[&str]| parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse_words =
+            |words: &[&str]| parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         assert_eq!(
             parse_words(&["hook", "post-tool-use"]),
             Ok(Command::Hook(crate::hook::Event::PostToolUse))
