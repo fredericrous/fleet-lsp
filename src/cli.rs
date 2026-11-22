@@ -78,6 +78,8 @@ pub(crate) enum Command {
         /// The directory to check, else the current one.
         path: Option<std::path::PathBuf>,
     },
+    /// `hook <event>`: run by the plugin's hooks, the JSON on stdin.
+    Hook(crate::hook::Event),
     Help,
     Version,
 }
@@ -92,6 +94,7 @@ fleet-lsp — pinned, ready language servers for Claude Code's LSP tool
 Usage:
   fleet-lsp doctor [--json] [PATH]
   fleet-lsp serve <rust|go|python|typescript> --min-version <x.y.z>
+  fleet-lsp hook <session-start|post-tool-use|subagent-start>
   fleet-lsp --help | --version
 
 doctor  Show, for the repository around PATH (default: the current
@@ -101,12 +104,18 @@ serve   Speak LSP on stdin/stdout in front of the pinned server. Claude
         Code runs it from the fleet-lsp plugin; a person never does.
         Started outside any git repository, it serves every repository
         whose files it is asked about, one server each.
+hook    Print the code-intelligence guidance for a Claude Code hook whose
+        JSON is on stdin, only where it serves: a session in a project of a
+        served language, its first touch of such a file, a subagent that
+        has the LSP tool. Claude Code runs it from the plugin; a person
+        never does.
 
 Exit codes:
   doctor  0 every language verified
           1 a language refused, or PATH is in no git repository
           2 usage error
   serve   0 exit after shutdown, 1 otherwise, 2 usage error or a terminal
+  hook    0 always on input it reads, 2 usage error or a terminal
 
 Docs: https://github.com/fredericrous/fleet-lsp
 ";
@@ -123,6 +132,21 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, Usage> {
         ["-V" | "--version"] => Ok(Command::Version),
         ["doctor", rest @ ..] => parse_doctor(rest),
         ["serve", rest @ ..] => parse_serve(rest),
+        ["hook", flag, ..] if flag.starts_with('-') => {
+            Err(Usage(format!("hook: unexpected {flag}")))
+        }
+        ["hook", event] => crate::hook::Event::parse(event)
+            .map(Command::Hook)
+            .ok_or_else(|| {
+                Usage(format!(
+                    "hook: unknown event `{event}` (want {})",
+                    crate::hook::Event::NAMES
+                ))
+            }),
+        ["hook", ..] => Err(Usage(format!(
+            "hook: needs one event ({})",
+            crate::hook::Event::NAMES
+        ))),
         [other, ..] => Err(Usage(format!("unknown command `{other}`"))),
     }
 }
@@ -217,6 +241,24 @@ mod tests {
 
     fn p(a: &[&str]) -> Result<Command, Usage> {
         parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn hook_takes_one_known_event() {
+        let parse_words =
+            |words: &[&str]| parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            parse_words(&["hook", "post-tool-use"]),
+            Ok(Command::Hook(crate::hook::Event::PostToolUse))
+        );
+        assert!(
+            matches!(parse_words(&["hook", "bogus"]), Err(Usage(m)) if m.contains("unknown event"))
+        );
+        assert!(parse_words(&["hook"]).is_err());
+        assert!(
+            matches!(parse_words(&["hook", "--version"]), Err(Usage(m)) if m == "hook: unexpected --version")
+        );
+        assert!(parse_words(&["hook", "session-start", "extra"]).is_err());
     }
 
     #[test]

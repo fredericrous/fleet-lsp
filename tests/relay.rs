@@ -2795,3 +2795,85 @@ fn workspace_a_retired_server_takes_its_grandchild_with_it() {
         "grandchild {g} outlived the retire"
     );
 }
+
+fn diagnostics_in(frame: &str) -> usize {
+    frame.matches(r#""range":"#).count()
+}
+
+const MANY: &str = r#""uri":"file:///many.rs""#;
+/// The fake writes `uri` before `diagnostics`; a re-serialised frame sorts
+/// `diagnostics` first, so this prefix is a frame forwarded as it came.
+const FEW_AS_SENT: &str = r#""params":{"uri":"file:///few.rs","diagnostics":"#;
+
+/// FALSIFY: return `unchanged` first in `relay::cap_published`.
+#[test]
+fn pushed_diagnostics_are_capped_per_file_and_small_pushes_pass_untouched() {
+    let _light = light();
+    let fx = Fixture::new("capped", true);
+    let mut s = Session::start(&fx, &[("FAKE_DIAGNOSTICS", "50:0")], true);
+    s.initialize(&fx.dir);
+    let many = s.frame_with(&[PUBLISH, MANY], ANSWER);
+    assert_eq!(diagnostics_in(&many), 21, "{many}");
+    assert!(
+        many.contains("30 more diagnostics (5 errors) not shown"),
+        "{many}"
+    );
+    let few = s.frame_with(&[PUBLISH, "file:///few.rs"], ANSWER);
+    assert!(few.contains(FEW_AS_SENT), "re-serialised: {few}");
+    assert_eq!(diagnostics_in(&few), 5);
+}
+
+/// A flood is one frame far past `parse_small`'s 1 MiB: it is capped too, the
+/// rewritten frame is whole, and the frame after it still reads.
+#[test]
+fn a_two_mebibyte_push_is_capped_and_framing_holds() {
+    let _light = light();
+    let fx = Fixture::new("capped-big", true);
+    let mut s = Session::start(&fx, &[("FAKE_DIAGNOSTICS", "6000:300")], true);
+    s.initialize(&fx.dir);
+    let many = s.frame_with(&[PUBLISH, MANY], ANSWER);
+    assert_eq!(diagnostics_in(&many), 21);
+    assert!(many.len() < 70 << 10, "{} bytes", many.len());
+    let few = s.frame_with(&[PUBLISH, "file:///few.rs"], ANSWER);
+    assert!(few.contains(FEW_AS_SENT), "{few}");
+}
+
+#[test]
+fn workspace_pushed_diagnostics_are_capped() {
+    let _light = light();
+    let ws = Workspace::new("capped-ws");
+    let a = ws.python("a", &[("FAKE_DIAGNOSTICS", "50:0")]);
+    let mut s = ws.start(&[], "python");
+    s.open(&a.join("x.py"), "python");
+    s.definition(1, &a.join("x.py"));
+    s.answer(1, ANSWER);
+    assert!(
+        events(&a).iter().any(|e| e.contains("pushed-diagnostics")),
+        "{:?}",
+        events(&a)
+    );
+    let many = s.frame_with(&[PUBLISH, MANY], ANSWER);
+    assert_eq!(diagnostics_in(&many), 21, "{many}");
+    let few = s.frame_with(&[PUBLISH, "file:///few.rs"], ANSWER);
+    assert!(few.contains(FEW_AS_SENT), "{few}");
+}
+
+/// FALSIFY: publish the pulled items uncapped in `Core::pull_done`.
+#[test]
+fn pulled_diagnostics_are_capped() {
+    let _light = light();
+    let fx = Fixture::effect("tsgo-capped");
+    let path = fx.path_env();
+    let mut s = Session::start_args(
+        &fx,
+        &[("PATH", path.as_str()), ("FAKE_PULL_EXTRA", "30")],
+        true,
+        &["serve", "typescript", "--min-version", "0.1.0"],
+    );
+    s.initialize(&fx.dir);
+    let file = fx.dir.join("x.ts");
+    s.open(&file, "typescript");
+    let published = s.frame_with(&[PUBLISH, &uri(&file)], ANSWER);
+    assert_eq!(diagnostics_in(&published), 21, "{published}");
+    assert!(published.contains("run `npx tsc --noEmit`"), "{published}");
+}

@@ -224,6 +224,12 @@ fn has_marker(lang: Lang, dir: &Path) -> bool {
     markers(lang).iter().any(|m| dir.join(m).exists())
 }
 
+/// Whether a `lang` project sits at or under `start`, inside `git`: the
+/// hook's question, answered as `serve` would find one.
+pub(crate) fn has_project(lang: Lang, start: &Path, git: &Path) -> bool {
+    !matches!(project_root(lang, start, git), Found::Nothing)
+}
+
 fn project_root(lang: Lang, start: &Path, git: &Path) -> Found {
     let up: Vec<&Path> = start
         .ancestors()

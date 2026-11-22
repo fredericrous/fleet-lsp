@@ -569,7 +569,7 @@ pub(crate) fn child_writer(mut stdin: ChildStdin, q: &Queue, emit: impl Fn(Ev) -
 fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mutex<ServerFilter>) {
     let mut reader = FrameReader::new(stdout);
     loop {
-        let body = match reader.next_frame() {
+        let mut body = match reader.next_frame() {
             Ok(Some(Frame::Body(b))) => b,
             Ok(Some(Frame::Oversize { scan, .. })) => {
                 let _ = tx.send(Ev::Input(Input::ServerOversize(scan)));
@@ -586,11 +586,15 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
         let mut forward = true;
         match s.kind() {
             Kind::Notification => {
-                let (seen, keep) = observe_notification(method, &body, f);
-                if let Some(ev) = seen {
+                let seen = observe_notification(method, &body, f);
+                if let Some(ev) = seen.event {
                     let _ = tx.send(ev);
                 }
-                forward = keep;
+                match seen.forward {
+                    Forward::Drop => forward = false,
+                    Forward::AsIs => {}
+                    Forward::Replace(b) => body = b,
+                }
             }
             Kind::Request => {
                 let id = s.id.clone().expect("a request has an id");
@@ -621,14 +625,29 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
     }
 }
 
-/// What a server notification tells the gate (or the log), and whether the
-/// client should see it under `f`.
-pub(crate) fn observe_notification(
-    method: &str,
-    body: &[u8],
-    f: ServerFilter,
-) -> (Option<Ev>, bool) {
-    match method {
+/// What a server notification tells the gate (or the log), and what the
+/// client gets of it under `filter`.
+#[derive(Debug)]
+pub(crate) struct Observed {
+    /// For the event loop.
+    pub(crate) event: Option<Ev>,
+    pub(crate) forward: Forward,
+}
+
+/// What reaches the client of a frame the server sent.
+#[derive(Debug)]
+pub(crate) enum Forward {
+    /// Nothing: fleet-lsp consumed it.
+    Drop,
+    /// The frame as it was read.
+    AsIs,
+    /// This instead: capped diagnostics.
+    Replace(Vec<u8>),
+}
+
+pub(crate) fn observe_notification(method: &str, body: &[u8], filter: ServerFilter) -> Observed {
+    let (event, keep) = match method {
+        "textDocument/publishDiagnostics" => return cap_published(body),
         "experimental/serverStatus" => {
             let seen = match status_signal(body) {
                 Some(sig) => Ev::Input(Input::ServerSignal(sig)),
@@ -637,11 +656,11 @@ pub(crate) fn observe_notification(
                     body.len()
                 )),
             };
-            (Some(seen), !f.swallow_status)
+            (Some(seen), !filter.swallow_status)
         }
         "$/progress" => (
             progress_signal(body).map(|sig| Ev::Input(Input::ServerSignal(sig))),
-            !f.own_progress,
+            !filter.own_progress,
         ),
         "window/logMessage" => (
             param_str(body, "message")
@@ -649,6 +668,30 @@ pub(crate) fn observe_notification(
             true,
         ),
         _ => (None, true),
+    };
+    Observed {
+        event,
+        forward: if keep { Forward::AsIs } else { Forward::Drop },
+    }
+}
+
+/// A `publishDiagnostics` from the server, capped per file
+/// (`core::cap_published`); anything it cannot read is forwarded as it came.
+fn cap_published(body: &[u8]) -> Observed {
+    match core::cap_published(body) {
+        None => Observed {
+            event: None,
+            forward: Forward::AsIs,
+        },
+        Some(c) => Observed {
+            event: (c.dropped > 0).then(|| {
+                Ev::Log(format!(
+                    "diagnostics of {} capped: {} dropped",
+                    c.uri, c.dropped
+                ))
+            }),
+            forward: Forward::Replace(c.frame),
+        },
     }
 }
 

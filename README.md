@@ -61,11 +61,20 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   `fleet-lsp: python: stale venv: pyright 1.1.414, pinned 1.1.411; fix: uv sync`.
 - **rust-analyzer that could not load the workspace** answers
   `rust-analyzer: workspace did not load: …` with a fix.
-- **At session start**, a five-line note
-  ([hooks/code-intelligence.sh](plugins/fleet-lsp/hooks/code-intelligence.sh))
+- **A six-line note** (`fleet-lsp hook`, run by
+  [hooks/code-intelligence.sh](plugins/fleet-lsp/hooks/code-intelligence.sh))
   tells the agent to navigate with the LSP tool, read only the range it
-  points to, and keep Grep for text. Every subagent (Explore, Plan,
-  reviewers, relais workers) gets the same note when it starts.
+  points to, and keep Grep for text. It loads only where it serves: at
+  session start when the session starts in a Rust, Go, Python or
+  TypeScript project; otherwise once, beside the first Read, Edit or Write
+  of such a file (a session started above several repositories gets it when
+  it first works on one). A subagent gets it when it starts, unless its
+  definition gives it no `LSP` tool. Decisions are logged to
+  `~/.local/state/fleet-lsp/hook/<date>.log`.
+- **Diagnostics are capped per file**: at most 20, and 64 KiB, errors
+  before warnings, information and hints dropped. When more were dropped,
+  one last diagnostic says how many and names the check that lists them
+  all (`cargo check`, `go vet ./...`, `pyright`, `npx tsc --noEmit`).
 
 ## Limits
 

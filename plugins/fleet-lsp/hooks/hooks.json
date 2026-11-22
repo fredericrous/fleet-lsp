@@ -5,7 +5,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/code-intelligence.sh\""
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/code-intelligence.sh\" session-start"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/code-intelligence.sh\" post-tool-use"
           }
         ]
       }
@@ -15,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/code-intelligence.sh\" subagent"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/code-intelligence.sh\" subagent-start"
           }
         ]
       }

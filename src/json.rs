@@ -4,8 +4,10 @@
 //! owned here rather than depended on (change.dependency-bar). fleet-lsp
 //! relays frames byte for byte; this module is used only where a whole value
 //! is needed — the `initialize` it re-serialises, the small status/progress
-//! /log frames the barriers read, and `doctor --json`. It must never be put
-//! in the path of an ordinary frame: re-serialising re-sorts keys and
+//! /log frames the barriers read, `doctor --json`, and the single
+//! diagnostics the per-file cap reads for their severity (`core::cut`; the
+//! frame itself is spliced by byte spans, never re-serialised). It must never
+//! be put in the path of an ordinary frame: re-serialising re-sorts keys and
 //! rewrites `1.0` as `1`.
 //!
 //! The reader is **strict**, because it also parses JSON-RPC traffic for

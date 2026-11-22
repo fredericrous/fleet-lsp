@@ -1605,13 +1605,17 @@ fn slot_reader(
         match s.kind() {
             Kind::Notification => {
                 let body = forward.take().expect("set above");
-                let (seen, keep) = relay::observe_notification(method, &body, f);
-                match seen {
+                let seen = relay::observe_notification(method, &body, f);
+                match seen.event {
                     Some(Ev::Input(input)) => emit(SlotEvent::Input(input)),
                     Some(Ev::Log(line)) => emit(SlotEvent::Log(line)),
                     Some(_) | None => true,
                 };
-                forward = keep.then_some(body);
+                forward = match seen.forward {
+                    relay::Forward::Drop => None,
+                    relay::Forward::AsIs => Some(body),
+                    relay::Forward::Replace(b) => Some(b),
+                };
             }
             Kind::Request => {
                 let body = forward.take().expect("set above");
