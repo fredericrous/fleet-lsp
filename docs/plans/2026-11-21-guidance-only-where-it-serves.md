@@ -87,5 +87,18 @@ Applied on both paths:
 - After release and install: a new Claude Code session started in `~/Developer/Perso` shows no fleet-lsp SessionStart text; after reading a `.rs` file, the guidance arrives once beside that tool result.
 
 ## Decision log
+- 2026-11-21 — done by hand, not relais: the run waited its full 1800 s admission budget (load ~585, 7 jobs queued on 3 slots) and launched nothing.
+- 2026-11-22 — the pushed cap does not parse the frame whole: the first version did, and `sustained_traffic_while_closed…` peaked at 307 MiB (limit 202) on 32 MiB diagnostics frames. `core::cap_published` finds the array's elements by byte spans (`src/spans.rs`), parses only elements up to 64 KiB for their severity (a larger one cannot be kept and counts as an error) and splices the kept bytes; the peak went back to 162 MiB, and kept diagnostics stay byte for byte (no re-sorted keys). `core::cut` is the one selection both paths share.
+- 2026-11-22 — carried items settled: an unknown event exits 2 (usage); the 64 KiB byte budget is in; the marker fast path logs nothing; `observe_notification` returns a struct; agents are found by `name` (`<type>.md` first), plugin agents from `installed_plugins.json`'s one `installPath` (several → inject).
+- 2026-11-22 — PostToolUse with an unusable `session_id` logs and prints nothing, rather than inject on every call as A3 read.
+- 2026-11-22 — the hooks.json-command checks against the real binary live in `tests/hook.rs`, not `scripts/check-plugin.sh`: CI's `deps` job runs the script without a Rust build. The script keeps the wiring checks and the old-binary/no-binary silence.
+- 2026-11-22 — deliberate: the p95 ≤ 20 ms bar is not met and the design stays. Measured on this host (load 25–50, debug build): `post-tool-use` with a marker p50 89 ms / p95 148 ms through the wrapper; `sh -c true` alone p50 38 / p95 56 ms, `fleet-lsp --version` alone p50 18 / p95 44 ms. The hook costs one shell plus one process start; the bar was set without a baseline.
+
+## Verification record
+- `make check` parts: fmt, clippy `-D warnings`, `cargo test` (all suites, run by the commit gate), `check-no-deps.sh`, `check-plugin.sh` → all pass. Falsified: dropping `post-tool-use` from hooks.json fails `check-plugin.sh`.
+- Cap unit tests (`core::tests`): 50 errors → 20 + summary; hints/info → dropped, no summary; errors first; exactly 20 and empty → unchanged; 1 warning dropped → "1 more diagnostic not shown … `npx tsc --noEmit`"; huge messages → ≤ 64 KiB, valid JSON → pass.
+- `tests/relay.rs`: 50-item push → 21 with "(5 errors)"; 6,000 × 300 B push (≈2.4 MiB) → 21, frame < 70 KiB, next frame reads and is forwarded byte-identical; workspace push → 21; tsgo pull with 31 errors → 21 → pass. Overload test peak RSS 162 MiB (limit 202).
+- `src/hook.rs` + `tests/hook.rs` (hooks.json commands via `sh -c`, temp state): non-project start silent, repo start guides (≤ 6 lines); first `.rs` touch guides once, `.md` nothing, second touch nothing and no log line; compaction clears the marker; `agent_id` touch silent, no marker; 8 parallel first touches → 1 output; unsafe ids write nothing; non-JSON silent; agents by `name`, comma/flow/block lists, deny list, unsupported syntax → inject; plugin agent from its one install → pass.
+- Real binary, temp `XDG_STATE_HOME`, this machine's `~/.claude/agents`: start in `~/Developer/Perso` → 0 lines; in the fleet-lsp checkout → guidance; `post-tool-use` on `fleet-lsp/src/main.rs` → JSON, then nothing; `browser-check`, `plan-review-po` → nothing; `Explore`, `implementation-review`, `relais:relais-research` → JSON (1165 bytes); `hook bogus` → exit 2 → as expected.
 
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,lang:rust,tui,unix,codex body-sha=d8411fd59f74 -->
