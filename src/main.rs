@@ -55,20 +55,18 @@ fn main() -> ExitCode {
 /// context for the agent. 0 on every input problem (logged), 2 for a
 /// terminal on stdin: a person who typed it would wait on nothing.
 fn run_hook(event: hook::Event) -> u8 {
-    use std::io::{IsTerminal, Read, Write};
+    use std::io::{IsTerminal, Read};
     if std::io::stdin().is_terminal() {
         eprintln!(
             "fleet-lsp: hook reads a Claude Code hook's JSON on stdin\nTry: fleet-lsp --help"
         );
         return 2;
     }
-    // With neither set, `log_dir()` is the working directory: the person's
-    // project. A hook writes nothing there; it stays silent instead.
-    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
-    if !set("XDG_STATE_HOME") && !set("HOME") {
+    // No absolute state directory: the fallback would be the working
+    // directory, the person's project. A hook writes nothing there.
+    let Some(state) = log::state_dir() else {
         return 0;
-    }
-    let state = log::log_dir();
+    };
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         hook::log_line(&state, &format!("hook: cannot read stdin: {e}"));
@@ -80,19 +78,6 @@ fn run_hook(event: hook::Event) -> u8 {
         home: home.as_deref(),
     };
     let outcome = hook::run(event, &input, &env);
-    if let Some(line) = &outcome.log {
-        hook::log_line(&state, line);
-    }
-    let mut stdout = std::io::stdout().lock();
-    if let Err(e) = stdout
-        .write_all(outcome.stdout.as_bytes())
-        .and_then(|()| stdout.flush())
-    {
-        // Not delivered: give the claim back, so the next contact guides.
-        if let Some(m) = &outcome.claimed {
-            let _ = std::fs::remove_file(m); // the log line below says why
-        }
-        hook::log_line(&state, &format!("hook: guidance not delivered: {e}"));
-    }
+    hook::deliver(&outcome, &mut std::io::stdout().lock(), &state);
     0
 }

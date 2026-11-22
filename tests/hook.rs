@@ -40,7 +40,7 @@ impl Box_ {
     fn new(name: &str) -> Box_ {
         let dir =
             std::env::temp_dir().join(format!("fleet-lsp-hooktest-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir); // a leftover scratch dir is replaced below
         fs::create_dir_all(dir.join("home")).unwrap();
         Box_ { dir }
     }
@@ -89,7 +89,7 @@ impl Box_ {
 
 impl Drop for Box_ {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+        let _ = fs::remove_dir_all(&self.dir); // a leftover scratch dir does not fail a test
     }
 }
 
@@ -164,6 +164,39 @@ fn input_that_is_not_json_is_silent() {
     let b = Box_::new("garbage");
     for event in ["SessionStart", "PostToolUse", "SubagentStart"] {
         assert_eq!(b.run(event, "not json"), "", "{event}");
+    }
+}
+
+/// FALSIFY: use `log_dir()` instead of `state_dir()` in `run_hook`.
+#[test]
+fn without_a_state_directory_the_hook_writes_nothing() {
+    let b = Box_::new("nostate");
+    let cwd = b.dir.join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    for xdg in [None, Some("relative/state")] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_fleet-lsp"));
+        cmd.args(["hook", "post-tool-use"])
+            .current_dir(&cwd)
+            .env_remove("HOME")
+            .env_remove("XDG_STATE_HOME");
+        if let Some(relative) = xdg {
+            cmd.env("XDG_STATE_HOME", relative);
+        }
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = touch("n1", "/x/a.rs");
+        let _ = child.stdin.take().unwrap().write_all(input.as_bytes()); // it may exit before reading
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{xdg:?}");
+        assert!(out.stdout.is_empty(), "{xdg:?}");
+        assert_eq!(
+            fs::read_dir(&cwd).unwrap().count(),
+            0,
+            "{xdg:?}: wrote into the project"
+        );
     }
 }
 

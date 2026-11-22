@@ -393,7 +393,7 @@ fn list(front: &[String], key: &str) -> ToolList {
     else {
         return ToolList::Absent;
     };
-    let value = front[at][key.len() + 1..].trim();
+    let inline = front[at][key.len() + 1..].trim();
     let split = |s: &str| -> Vec<String> {
         s.split(',')
             .map(unquote)
@@ -401,7 +401,7 @@ fn list(front: &[String], key: &str) -> ToolList {
             .map(str::to_string)
             .collect()
     };
-    if value.is_empty() {
+    if inline.is_empty() {
         let items: Vec<&String> = front[at + 1..]
             .iter()
             .take_while(|l| l.starts_with(' ') || l.starts_with('\t') || l.starts_with('-'))
@@ -415,15 +415,15 @@ fn list(front: &[String], key: &str) -> ToolList {
         }
         return ToolList::Listed(out);
     }
-    if let Some(inner) = value.strip_prefix('[') {
+    if let Some(inner) = inline.strip_prefix('[') {
         return inner
             .strip_suffix(']')
             .map_or(ToolList::Unreadable, |i| ToolList::Listed(split(i)));
     }
-    if value.starts_with(['{', '|', '>', '&', '*']) {
+    if inline.starts_with(['{', '|', '>', '&', '*']) {
         return ToolList::Unreadable;
     }
-    ToolList::Listed(split(value))
+    ToolList::Listed(split(inline))
 }
 
 /// What the `tools` / `disallowedTools` front matter says of LSP.
@@ -444,6 +444,29 @@ fn allows_lsp(front: &[String]) -> ToolAccess {
     }
 }
 
+/// Writes `outcome.stdout` for Claude Code, then logs `outcome.log`, marked
+/// when the write failed. A failed write gives the claimed marker back, so a
+/// lost delivery does not use up the session's guidance.
+pub(crate) fn deliver(outcome: &Outcome, out: &mut impl Write, state: &Path) {
+    let written = out
+        .write_all(outcome.stdout.as_bytes())
+        .and_then(|()| out.flush());
+    let line = match (&outcome.log, &written) {
+        (Some(line), Ok(())) => Some(line.clone()),
+        (Some(line), Err(e)) => Some(format!("{line} (not delivered: {e})")),
+        (None, Ok(())) => None,
+        (None, Err(e)) => Some(format!("hook: guidance not delivered: {e}")),
+    };
+    if written.is_err() {
+        if let Some(mark) = &outcome.claimed {
+            let _ = fs::remove_file(mark); // the log line below says why
+        }
+    }
+    if let Some(line) = line {
+        log_line(state, &line);
+    }
+}
+
 /// Appends `line` to `<state>/hook/<utc date>.log`, one file a day so the
 /// session logs' pruning (`log::prune`, 14 days) bounds it; a failure is
 /// dropped (logging never fails a hook).
@@ -452,14 +475,15 @@ pub(crate) fn log_line(state: &Path, line: &str) {
     let now = SystemTime::now();
     let stamp = crate::log::rfc3339(now);
     let day = stamp.get(..10).unwrap_or("undated");
-    let _ = fs::create_dir_all(&dir).and_then(|()| {
+    let written = fs::create_dir_all(&dir).and_then(|()| {
         crate::log::prune(&dir, now);
         let mut f = File::options()
             .create(true)
             .append(true)
             .open(dir.join(format!("{day}.log")))?;
         writeln!(f, "{stamp} {}", line.replace('\n', " | "))
-    }); // nowhere left to report a log that cannot be written
+    });
+    drop(written); // nowhere left to report a log that cannot be written
 }
 
 #[cfg(test)]
@@ -473,7 +497,7 @@ mod tests {
         fn new(name: &str) -> Scratch {
             let dir =
                 std::env::temp_dir().join(format!("fleet-lsp-hook-{}-{name}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
+            let _ = fs::remove_dir_all(&dir); // a leftover scratch dir is replaced below
             fs::create_dir_all(&dir).unwrap();
             Scratch(dir)
         }
@@ -505,7 +529,7 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let _ = fs::remove_dir_all(&self.0); // a leftover scratch dir does not fail a test
         }
     }
 
@@ -628,6 +652,34 @@ mod tests {
         }
         assert!(!s.0.join("state/x").exists());
         assert!(!s.0.join("x").exists());
+    }
+
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// FALSIFY: drop the `remove_file` in `deliver`.
+    #[test]
+    fn a_lost_delivery_gives_the_marker_back() {
+        let s = Scratch::new("lost");
+        let outcome = s.run(Event::PostToolUse, &touch("l1", "/x/a.rs"));
+        assert!(s.marker("l1").exists());
+        deliver(&outcome, &mut Closed, &s.0.join("state"));
+        assert!(!s.marker("l1").exists(), "the next contact guides");
+        let log: String = fs::read_dir(s.0.join("state/hook"))
+            .unwrap()
+            .flatten()
+            .map(|e| fs::read_to_string(e.path()).unwrap())
+            .collect();
+        assert!(log.contains("guided on /x/a.rs (not delivered:"), "{log}");
+        assert_eq!(log.lines().count(), 1, "{log}");
     }
 
     #[test]

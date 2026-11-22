@@ -15,14 +15,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const KEEP: Duration = Duration::from_secs(14 * 24 * 3600);
 
-/// `$XDG_STATE_HOME/fleet-lsp`, else `~/.local/state/fleet-lsp`.
+/// `$XDG_STATE_HOME/fleet-lsp`, else `~/.local/state/fleet-lsp`; `None`
+/// when neither names an absolute directory (the XDG spec ignores a relative
+/// `XDG_STATE_HOME`).
+pub(crate) fn state_dir() -> Option<PathBuf> {
+    let absolute = |v: std::ffi::OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
+    std::env::var_os("XDG_STATE_HOME")
+        .and_then(absolute)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .and_then(absolute)
+                .map(|h| h.join(".local/state"))
+        })
+        .map(|base| base.join("fleet-lsp"))
+}
+
+/// [`state_dir`], else `./fleet-lsp`: a relay keeps its log somewhere.
 pub(crate) fn log_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("fleet-lsp")
+    state_dir().unwrap_or_else(|| PathBuf::from("./fleet-lsp"))
 }
 
 #[derive(Debug)]

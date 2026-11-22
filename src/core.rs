@@ -1045,15 +1045,15 @@ pub(crate) fn cut(items: &[(i64, usize)]) -> Cut {
 
 /// LSP's 1 (error) to 4 (hint); a missing, fractional-spelled or
 /// out-of-range severity is read as the nearest level, an error first.
-fn severity_of(d: &Json) -> i64 {
-    let n = match d.get("severity") {
-        Some(Json::Int(n)) => *n,
-        Some(Json::Num(f)) if *f >= 3.5 => 4,
-        Some(Json::Num(f)) if *f >= 2.5 => 3,
-        Some(Json::Num(f)) if *f >= 1.5 => 2,
+fn severity_of(diagnostic: &Json) -> i64 {
+    let level = match diagnostic.get("severity") {
+        Some(Json::Int(level)) => *level,
+        Some(Json::Num(spelled)) if *spelled >= 3.5 => 4,
+        Some(Json::Num(spelled)) if *spelled >= 2.5 => 3,
+        Some(Json::Num(spelled)) if *spelled >= 1.5 => 2,
         _ => 1,
     };
-    n.clamp(1, 4)
+    level.clamp(1, 4)
 }
 
 /// `items`, one file's diagnostics, capped as [`cut`] says, with one last
@@ -1062,17 +1062,21 @@ fn severity_of(d: &Json) -> i64 {
 pub(crate) fn cap_diagnostics(items: &[Json], uri: &str) -> Option<(Json, usize)> {
     let sized: Vec<(i64, usize)> = items
         .iter()
-        .map(|d| (severity_of(d), d.to_string().len()))
+        .map(|diagnostic| (severity_of(diagnostic), diagnostic.to_string().len()))
         .collect();
-    let c = cut(&sized);
-    if !c.changed {
+    let selection = cut(&sized);
+    if !selection.changed {
         return None;
     }
-    let mut out: Vec<Json> = c.kept.iter().map(|&i| items[i].clone()).collect();
-    if c.dropped > 0 {
-        out.push(cap_summary(c.dropped, c.dropped_errors, uri));
+    let mut out: Vec<Json> = selection.kept.iter().map(|&i| items[i].clone()).collect();
+    if selection.dropped > 0 {
+        out.push(cap_summary(
+            selection.dropped,
+            selection.dropped_errors,
+            uri,
+        ));
     }
-    Some((Json::Arr(out), c.dropped))
+    Some((Json::Arr(out), selection.dropped))
 }
 
 /// A server's `publishDiagnostics` frame, capped as [`cut`] says, without
@@ -1097,29 +1101,29 @@ pub(crate) fn cap_published(body: &[u8]) -> Option<Capped> {
                 .filter(|b| b.len() <= DIAGNOSTICS_BYTES_PER_FILE)
                 .and_then(|b| std::str::from_utf8(b).ok())
                 .and_then(|t| json::parse(t).ok())
-                .map_or(1, |d| severity_of(&d));
+                .map_or(1, |diagnostic| severity_of(&diagnostic));
             (severity, r.len())
         })
         .collect();
-    let c = cut(&sized);
-    if !c.changed {
+    let selection = cut(&sized);
+    if !selection.changed {
         return None;
     }
     let mut out = Vec::with_capacity(array.start + DIAGNOSTICS_BYTES_PER_FILE + 64);
     out.extend_from_slice(&body[..array.start]);
     out.push(b'[');
-    for (n, &i) in c.kept.iter().enumerate() {
+    for (n, &i) in selection.kept.iter().enumerate() {
         if n > 0 {
             out.push(b',');
         }
         out.extend_from_slice(&body[elements[i].clone()]);
     }
-    if c.dropped > 0 {
-        if !c.kept.is_empty() {
+    if selection.dropped > 0 {
+        if !selection.kept.is_empty() {
             out.push(b',');
         }
         out.extend_from_slice(
-            cap_summary(c.dropped, c.dropped_errors, &uri)
+            cap_summary(selection.dropped, selection.dropped_errors, &uri)
                 .to_string()
                 .as_bytes(),
         );
@@ -1129,11 +1133,12 @@ pub(crate) fn cap_published(body: &[u8]) -> Option<Capped> {
     Some(Capped {
         frame: out,
         uri,
-        dropped: c.dropped,
+        dropped: selection.dropped,
     })
 }
 
 /// A `publishDiagnostics` frame the cap rewrote.
+#[derive(Debug)]
 pub(crate) struct Capped {
     pub(crate) frame: Vec<u8>,
     pub(crate) uri: String,

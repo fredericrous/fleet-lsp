@@ -626,7 +626,8 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
 }
 
 /// What a server notification tells the gate (or the log), and what the
-/// client gets of it under `f`.
+/// client gets of it under `filter`.
+#[derive(Debug)]
 pub(crate) struct Observed {
     /// For the event loop.
     pub(crate) event: Option<Ev>,
@@ -634,6 +635,7 @@ pub(crate) struct Observed {
 }
 
 /// What reaches the client of a frame the server sent.
+#[derive(Debug)]
 pub(crate) enum Forward {
     /// Nothing: fleet-lsp consumed it.
     Drop,
@@ -643,7 +645,7 @@ pub(crate) enum Forward {
     Replace(Vec<u8>),
 }
 
-pub(crate) fn observe_notification(method: &str, body: &[u8], f: ServerFilter) -> Observed {
+pub(crate) fn observe_notification(method: &str, body: &[u8], filter: ServerFilter) -> Observed {
     let (event, keep) = match method {
         "textDocument/publishDiagnostics" => return cap_published(body),
         "experimental/serverStatus" => {
@@ -654,11 +656,11 @@ pub(crate) fn observe_notification(method: &str, body: &[u8], f: ServerFilter) -
                     body.len()
                 )),
             };
-            (Some(seen), !f.swallow_status)
+            (Some(seen), !filter.swallow_status)
         }
         "$/progress" => (
             progress_signal(body).map(|sig| Ev::Input(Input::ServerSignal(sig))),
-            !f.own_progress,
+            !filter.own_progress,
         ),
         "window/logMessage" => (
             param_str(body, "message")
