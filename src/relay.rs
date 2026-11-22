@@ -590,9 +590,10 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
                 if let Some(ev) = seen.event {
                     let _ = tx.send(ev);
                 }
-                forward = seen.keep;
-                if let Some(b) = seen.body {
-                    body = b;
+                match seen.forward {
+                    Forward::Drop => forward = false,
+                    Forward::AsIs => {}
+                    Forward::Replace(b) => body = b,
                 }
             }
             Kind::Request => {
@@ -624,16 +625,22 @@ fn child_reader(stdout: ChildStdout, out: &Queue, tx: &Sender<Ev>, filter: &Mute
     }
 }
 
-/// What a server notification tells the gate (or the log), and whether the
-/// client should see it under `f`.
-/// What a server notification said, and what becomes of it.
+/// What a server notification tells the gate (or the log), and what the
+/// client gets of it under `f`.
 pub(crate) struct Observed {
     /// For the event loop.
     pub(crate) event: Option<Ev>,
-    /// Forward it to the client.
-    pub(crate) keep: bool,
-    /// Forward this instead of the frame read: capped diagnostics.
-    pub(crate) body: Option<Vec<u8>>,
+    pub(crate) forward: Forward,
+}
+
+/// What reaches the client of a frame the server sent.
+pub(crate) enum Forward {
+    /// Nothing: fleet-lsp consumed it.
+    Drop,
+    /// The frame as it was read.
+    AsIs,
+    /// This instead: capped diagnostics.
+    Replace(Vec<u8>),
 }
 
 pub(crate) fn observe_notification(method: &str, body: &[u8], f: ServerFilter) -> Observed {
@@ -662,26 +669,27 @@ pub(crate) fn observe_notification(method: &str, body: &[u8], f: ServerFilter) -
     };
     Observed {
         event,
-        keep,
-        body: None,
+        forward: if keep { Forward::AsIs } else { Forward::Drop },
     }
 }
 
 /// A `publishDiagnostics` from the server, capped per file
 /// (`core::cap_published`); anything it cannot read is forwarded as it came.
 fn cap_published(body: &[u8]) -> Observed {
-    let Some((capped, uri, dropped)) = core::cap_published(body) else {
-        return Observed {
+    match core::cap_published(body) {
+        None => Observed {
             event: None,
-            keep: true,
-            body: None,
-        };
-    };
-    Observed {
-        event: (dropped > 0)
-            .then(|| Ev::Log(format!("diagnostics of {uri} capped: {dropped} dropped"))),
-        keep: true,
-        body: Some(capped),
+            forward: Forward::AsIs,
+        },
+        Some(c) => Observed {
+            event: (c.dropped > 0).then(|| {
+                Ev::Log(format!(
+                    "diagnostics of {} capped: {} dropped",
+                    c.uri, c.dropped
+                ))
+            }),
+            forward: Forward::Replace(c.frame),
+        },
     }
 }
 

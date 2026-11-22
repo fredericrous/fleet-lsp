@@ -2796,8 +2796,6 @@ fn workspace_a_retired_server_takes_its_grandchild_with_it() {
     );
 }
 
-// ------------------------------------------------------------ diagnostic cap
-
 fn diagnostics_in(frame: &str) -> usize {
     frame.matches(r#""range":"#).count()
 }

@@ -1043,11 +1043,17 @@ pub(crate) fn cut(items: &[(i64, usize)]) -> Cut {
     }
 }
 
+/// LSP's 1 (error) to 4 (hint); a missing, fractional-spelled or
+/// out-of-range severity is read as the nearest level, an error first.
 fn severity_of(d: &Json) -> i64 {
-    match d.get("severity") {
+    let n = match d.get("severity") {
         Some(Json::Int(n)) => *n,
+        Some(Json::Num(f)) if *f >= 3.5 => 4,
+        Some(Json::Num(f)) if *f >= 2.5 => 3,
+        Some(Json::Num(f)) if *f >= 1.5 => 2,
         _ => 1,
-    }
+    };
+    n.clamp(1, 4)
 }
 
 /// `items`, one file's diagnostics, capped as [`cut`] says, with one last
@@ -1075,9 +1081,8 @@ pub(crate) fn cap_diagnostics(items: &[Json], uri: &str) -> Option<(Json, usize)
 /// found by byte spans (`crate::spans`), each element up to the byte budget
 /// is parsed alone for its severity (a larger one cannot be kept, and counts
 /// as an error), and the kept elements are spliced back byte for byte.
-/// `None` when nothing changes or the frame is not one this reads; else the
-/// new frame, its URI and how many errors and warnings it dropped.
-pub(crate) fn cap_published(body: &[u8]) -> Option<(Vec<u8>, String, usize)> {
+/// `None` when nothing changes or the frame is not one this reads.
+pub(crate) fn cap_published(body: &[u8]) -> Option<Capped> {
     use crate::spans;
     let top = spans::members(body, spans::ws(body, 0))?;
     let params = spans::member(body, &top, "params")?;
@@ -1088,9 +1093,9 @@ pub(crate) fn cap_published(body: &[u8]) -> Option<(Vec<u8>, String, usize)> {
     let sized: Vec<(i64, usize)> = elements
         .iter()
         .map(|r| {
-            let severity = (r.len() <= DIAGNOSTICS_BYTES_PER_FILE)
-                .then(|| std::str::from_utf8(&body[r.clone()]).ok())
-                .flatten()
+            let severity = Some(&body[r.clone()])
+                .filter(|b| b.len() <= DIAGNOSTICS_BYTES_PER_FILE)
+                .and_then(|b| std::str::from_utf8(b).ok())
                 .and_then(|t| json::parse(t).ok())
                 .map_or(1, |d| severity_of(&d));
             (severity, r.len())
@@ -1121,7 +1126,19 @@ pub(crate) fn cap_published(body: &[u8]) -> Option<(Vec<u8>, String, usize)> {
     }
     out.push(b']');
     out.extend_from_slice(&body[array.end..]);
-    Some((out, uri, c.dropped))
+    Some(Capped {
+        frame: out,
+        uri,
+        dropped: c.dropped,
+    })
+}
+
+/// A `publishDiagnostics` frame the cap rewrote.
+pub(crate) struct Capped {
+    pub(crate) frame: Vec<u8>,
+    pub(crate) uri: String,
+    /// Errors and warnings left out.
+    pub(crate) dropped: usize,
 }
 
 /// The diagnostic that stands for the `dropped` ones the cap removed.
@@ -2170,8 +2187,6 @@ mod tests {
         assert!(c.is_quiet());
     }
 
-    // ------------------------------------------------------- diagnostic cap
-
     fn diag(severity: Option<i64>, message: &str) -> Json {
         Json::obj()
             .set_opt("severity", severity)
@@ -2252,6 +2267,18 @@ mod tests {
             "{summary}"
         );
         assert!(summary.ends_with("run `npx tsc --noEmit`"), "{summary}");
+    }
+
+    #[test]
+    fn odd_severities_read_as_the_nearest_level() {
+        let items = vec![
+            Json::obj().set("severity", 2.0).set("message", "w"),
+            Json::obj().set("severity", 0i64).set("message", "e"),
+            Json::obj().set("severity", 9i64).set("message", "hint"),
+        ];
+        let (out, _) = capped(&items, "file:///x.rs").expect("changed");
+        let order: Vec<&str> = out.iter().map(message).collect();
+        assert_eq!(order, ["e", "w"]);
     }
 
     /// FALSIFY: drop the byte test in `cap_diagnostics`.

@@ -124,7 +124,7 @@ pub(crate) fn newest(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
-fn prune(dir: &Path, now: SystemTime) {
+pub(crate) fn prune(dir: &Path, now: SystemTime) {
     for f in fs::read_dir(dir).into_iter().flatten().flatten() {
         let old = f
             .metadata()

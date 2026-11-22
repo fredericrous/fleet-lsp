@@ -124,7 +124,13 @@ fn post_tool_use_guides_on_the_first_served_file_only() {
     assert!(out.contains(r#""hookEventName":"PostToolUse""#), "{out}");
     assert!(out.contains("Code intelligence (fleet-lsp"), "{out}");
     assert_eq!(b.run("PostToolUse", &touch("t1", "/x/src/lib.rs")), "");
-    let log = fs::read_to_string(b.dir.join("state/fleet-lsp/hook.log")).unwrap();
+    let logs: Vec<PathBuf> = fs::read_dir(b.dir.join("state/fleet-lsp/hook"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(logs.len(), 1, "one dated log: {logs:?}");
+    let log = fs::read_to_string(&logs[0]).unwrap();
     assert!(
         log.contains("PostToolUse t1: guided on /x/src/main.rs"),
         "{log}"

@@ -70,7 +70,7 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   of such a file (a session started above several repositories gets it when
   it first works on one). A subagent gets it when it starts, unless its
   definition gives it no `LSP` tool. Decisions are logged to
-  `~/.local/state/fleet-lsp/hook.log`.
+  `~/.local/state/fleet-lsp/hook/<date>.log`.
 - **Diagnostics are capped per file**: at most 20, and 64 KiB, errors
   before warnings, information and hints dropped. When more were dropped,
   one last diagnostic says how many and names the check that lists them

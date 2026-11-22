@@ -1611,7 +1611,11 @@ fn slot_reader(
                     Some(Ev::Log(line)) => emit(SlotEvent::Log(line)),
                     Some(_) | None => true,
                 };
-                forward = seen.keep.then(|| seen.body.unwrap_or(body));
+                forward = match seen.forward {
+                    relay::Forward::Drop => None,
+                    relay::Forward::AsIs => Some(body),
+                    relay::Forward::Replace(b) => Some(b),
+                };
             }
             Kind::Request => {
                 let body = forward.take().expect("set above");

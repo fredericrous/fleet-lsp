@@ -132,6 +132,9 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, Usage> {
         ["-V" | "--version"] => Ok(Command::Version),
         ["doctor", rest @ ..] => parse_doctor(rest),
         ["serve", rest @ ..] => parse_serve(rest),
+        ["hook", flag, ..] if flag.starts_with('-') => {
+            Err(Usage(format!("hook: unexpected {flag}")))
+        }
         ["hook", event] => crate::hook::Event::parse(event)
             .map(Command::Hook)
             .ok_or_else(|| {
@@ -249,6 +252,9 @@ mod tests {
         );
         assert!(matches!(p(&["hook", "bogus"]), Err(Usage(m)) if m.contains("unknown event")));
         assert!(p(&["hook"]).is_err());
+        assert!(
+            matches!(p(&["hook", "--version"]), Err(Usage(m)) if m == "hook: unexpected --version")
+        );
         assert!(p(&["hook", "session-start", "extra"]).is_err());
     }
 

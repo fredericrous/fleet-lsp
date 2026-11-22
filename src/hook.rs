@@ -11,7 +11,7 @@
 //!   has no LSP tool.
 //!
 //! Claude Code passes the hook's JSON on stdin. Every input problem exits 0
-//! with nothing printed and a line in `<state>/hook.log`: a hook never
+//! with nothing printed and a line in `<state>/hook/<date>.log`: a hook never
 //! raises an error in the person's session. Only usage errors exit 2.
 
 use crate::cli::Lang;
@@ -84,6 +84,9 @@ pub(crate) struct Env<'a> {
 pub(crate) struct Outcome {
     pub(crate) stdout: String,
     pub(crate) log: Option<String>,
+    /// The marker this call claimed: the caller removes it when `stdout`
+    /// cannot be written, so a lost write does not use up the session.
+    pub(crate) claimed: Option<PathBuf>,
 }
 
 impl Outcome {
@@ -93,8 +96,8 @@ impl Outcome {
 
     fn logged(line: String) -> Outcome {
         Outcome {
-            stdout: String::new(),
             log: Some(line),
+            ..Outcome::default()
         }
     }
 }
@@ -136,7 +139,9 @@ fn marker(env: &Env, session: &str) -> Option<PathBuf> {
 
 /// Claims `path`: true only for the one call that created it.
 fn claim(path: &Path) -> io::Result<bool> {
-    let dir = path.parent().expect("a marker has a directory");
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "a marker with no directory"))?;
     fs::create_dir_all(dir)?;
     match File::options().write(true).create_new(true).open(path) {
         Ok(_) => {
@@ -157,7 +162,7 @@ fn prune_markers(dir: &Path, now: SystemTime) {
             .and_then(|t| now.duration_since(t).ok())
             .is_some_and(|age| age > MARKER_KEEP);
         if old {
-            let _ = fs::remove_file(f.path());
+            let _ = fs::remove_file(f.path()); // best effort: the next claim prunes again
         }
     }
 }
@@ -172,15 +177,13 @@ fn context_json(event: Event) -> String {
     format!("{out}\n")
 }
 
-// ------------------------------------------------------------ session start
-
 fn session_start(msg: &Json, env: &Env) -> Outcome {
     let session = str_at(msg, &["session_id"]).unwrap_or("");
     let mark = marker(env, session);
     // A start, a resume, a clear or a compaction: whatever guidance the
     // session held may be gone, so the next contact may give it again.
     if let Some(m) = &mark {
-        let _ = fs::remove_file(m);
+        let _ = fs::remove_file(m); // absent is the state this wants
     }
     let Some(cwd) = str_at(msg, &["cwd"]) else {
         return Outcome::logged(format!("SessionStart {session}: no cwd"));
@@ -188,15 +191,18 @@ fn session_start(msg: &Json, env: &Env) -> Outcome {
     let Some(lang) = project_here(Path::new(cwd)) else {
         return Outcome::silent();
     };
-    if let Some(m) = &mark {
-        let _ = claim(m);
-    }
+    let (claimed, unmarked) = match mark.as_deref().map(claim) {
+        Some(Ok(true)) => (mark, String::new()),
+        Some(Ok(false)) | None => (None, String::new()),
+        Some(Err(e)) => (None, format!("; marker not written: {e}")),
+    };
     Outcome {
         stdout: GUIDANCE.to_string(),
         log: Some(format!(
-            "SessionStart {session}: guided ({} project in {cwd})",
+            "SessionStart {session}: guided ({} project in {cwd}){unmarked}",
             lang.name()
         )),
+        claimed,
     }
 }
 
@@ -208,8 +214,6 @@ fn project_here(cwd: &Path) -> Option<Lang> {
         .into_iter()
         .find(|&lang| resolve::has_project(lang, cwd, &git))
 }
-
-// ------------------------------------------------------------ post tool use
 
 fn post_tool_use(msg: &Json, env: &Env) -> Outcome {
     // A subagent's tool call: SubagentStart already decided its guidance, and
@@ -234,6 +238,7 @@ fn post_tool_use(msg: &Json, env: &Env) -> Outcome {
         Ok(true) => Outcome {
             stdout: context_json(Event::PostToolUse),
             log: Some(format!("PostToolUse {session}: guided on {file}")),
+            claimed: Some(mark),
         },
         Ok(false) => Outcome::silent(),
         Err(e) => Outcome::logged(format!(
@@ -250,27 +255,37 @@ pub(crate) fn is_served(file: &str) -> bool {
         .is_some_and(|e| SERVED.contains(&e))
 }
 
-// ----------------------------------------------------------- subagent start
-
 fn subagent_start(msg: &Json, env: &Env) -> Outcome {
     let agent = str_at(msg, &["agent_type"]).unwrap_or("");
     let cwd = str_at(msg, &["cwd"]).map(Path::new);
-    if has_lsp(agent, cwd, env.home) == Some(false) {
+    if lsp_access(agent, cwd, env.home) == ToolAccess::Denied {
         return Outcome::logged(format!("SubagentStart {agent}: no LSP tool, skipped"));
     }
     Outcome {
         stdout: context_json(Event::SubagentStart),
-        log: None,
+        ..Outcome::default()
     }
 }
 
-/// Whether agent `agent` may call the LSP tool: `None` when that cannot be
-/// told (no definition found, or a syntax this does not read), which the
-/// caller treats as yes.
-pub(crate) fn has_lsp(agent: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<bool> {
+/// Whether an agent may call the LSP tool, as its definition says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolAccess {
+    Allowed,
+    Denied,
+    /// No definition found, or a syntax this does not read: treated as
+    /// allowed, today's behaviour.
+    Unknown,
+}
+
+pub(crate) fn lsp_access(agent: &str, cwd: Option<&Path>, home: Option<&Path>) -> ToolAccess {
     if BUILTIN_WITHOUT_LSP.contains(&agent) {
-        return Some(false);
+        return ToolAccess::Denied;
     }
+    definition_of(agent, cwd, home).map_or(ToolAccess::Unknown, |front| allows_lsp(&front))
+}
+
+/// The front matter of agent `agent`'s definition.
+fn definition_of(agent: &str, cwd: Option<&Path>, home: Option<&Path>) -> Option<Vec<String>> {
     let (dirs, name): (Vec<PathBuf>, &str) = match agent.split_once(':') {
         Some((plugin, name)) => (vec![plugin_agents(plugin, home?)?], name),
         None => {
@@ -284,8 +299,7 @@ pub(crate) fn has_lsp(agent: &str, cwd: Option<&Path>, home: Option<&Path>) -> O
             (dirs, agent)
         }
     };
-    let front = dirs.iter().find_map(|d| definition(d, name))?;
-    allows_lsp(&front)
+    dirs.iter().find_map(|d| definition(d, name))
 }
 
 /// `agents/` of the one installed plugin named `plugin`, from Claude Code's
@@ -362,15 +376,22 @@ fn scalar(front: &[String], key: &str) -> Option<String> {
     })
 }
 
-/// A list field: absent → `Ok(None)`; a comma string, a flow list
-/// (`[a, b]`) or a block list (`- a` lines) → its items; anything else →
-/// `Err(())`, which the caller reads as "cannot tell".
-fn list(front: &[String], key: &str) -> Result<Option<Vec<String>>, ()> {
+/// A front-matter list field, read.
+#[derive(Debug, PartialEq, Eq)]
+enum ToolList {
+    Absent,
+    /// A comma string, a flow list (`[a, b]`) or a block list (`- a` lines).
+    Listed(Vec<String>),
+    /// A syntax this does not read.
+    Unreadable,
+}
+
+fn list(front: &[String], key: &str) -> ToolList {
     let Some(at) = front
         .iter()
         .position(|l| l.strip_prefix(key).is_some_and(|r| r.starts_with(':')))
     else {
-        return Ok(None);
+        return ToolList::Absent;
     };
     let value = front[at][key.len() + 1..].trim();
     let split = |s: &str| -> Vec<String> {
@@ -387,49 +408,58 @@ fn list(front: &[String], key: &str) -> Result<Option<Vec<String>>, ()> {
             .collect();
         let mut out = Vec::new();
         for l in items {
-            let item = l.trim_start().strip_prefix('-').ok_or(())?;
-            out.push(unquote(item).to_string());
+            let Some(entry) = l.trim_start().strip_prefix('-') else {
+                return ToolList::Unreadable;
+            };
+            out.push(unquote(entry).to_string());
         }
-        return Ok(Some(out));
+        return ToolList::Listed(out);
     }
     if let Some(inner) = value.strip_prefix('[') {
-        let inner = inner.strip_suffix(']').ok_or(())?;
-        return Ok(Some(split(inner)));
+        return inner
+            .strip_suffix(']')
+            .map_or(ToolList::Unreadable, |i| ToolList::Listed(split(i)));
     }
     if value.starts_with(['{', '|', '>', '&', '*']) {
-        return Err(());
+        return ToolList::Unreadable;
     }
-    Ok(Some(split(value)))
+    ToolList::Listed(split(value))
 }
 
 /// What the `tools` / `disallowedTools` front matter says of LSP.
-fn allows_lsp(front: &[String]) -> Option<bool> {
+fn allows_lsp(front: &[String]) -> ToolAccess {
     let is_lsp = |t: &String| t == "LSP" || t.starts_with("LSP(");
-    if let Some(deny) = list(front, "disallowedTools").ok()? {
-        if deny.iter().any(is_lsp) {
-            return Some(false);
-        }
+    match list(front, "disallowedTools") {
+        ToolList::Unreadable => return ToolAccess::Unknown,
+        ToolList::Listed(deny) if deny.iter().any(is_lsp) => return ToolAccess::Denied,
+        ToolList::Listed(_) | ToolList::Absent => {}
     }
-    match list(front, "tools").ok()? {
-        None => Some(true),
-        Some(tools) => Some(tools.iter().any(|t| is_lsp(t) || t == "*")),
+    match list(front, "tools") {
+        ToolList::Unreadable => ToolAccess::Unknown,
+        ToolList::Absent => ToolAccess::Allowed,
+        ToolList::Listed(tools) if tools.iter().any(|t| is_lsp(t) || t == "*") => {
+            ToolAccess::Allowed
+        }
+        ToolList::Listed(_) => ToolAccess::Denied,
     }
 }
 
-/// Appends `line` to `<state>/hook.log`; a failure is dropped.
+/// Appends `line` to `<state>/hook/<utc date>.log`, one file a day so the
+/// session logs' pruning (`log::prune`, 14 days) bounds it; a failure is
+/// dropped (logging never fails a hook).
 pub(crate) fn log_line(state: &Path, line: &str) {
-    let _ = fs::create_dir_all(state).and_then(|()| {
+    let dir = state.join("hook");
+    let now = SystemTime::now();
+    let stamp = crate::log::rfc3339(now);
+    let day = stamp.get(..10).unwrap_or("undated");
+    let _ = fs::create_dir_all(&dir).and_then(|()| {
+        crate::log::prune(&dir, now);
         let mut f = File::options()
             .create(true)
             .append(true)
-            .open(state.join("hook.log"))?;
-        writeln!(
-            f,
-            "{} {}",
-            crate::log::rfc3339(SystemTime::now()),
-            line.replace('\n', " | ")
-        )
-    });
+            .open(dir.join(format!("{day}.log")))?;
+        writeln!(f, "{stamp} {}", line.replace('\n', " | "))
+    }); // nowhere left to report a log that cannot be written
 }
 
 #[cfg(test)]
