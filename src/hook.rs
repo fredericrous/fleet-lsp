@@ -457,11 +457,17 @@ pub(crate) fn deliver(outcome: &Outcome, out: &mut impl Write, state: &Path) {
         (None, Ok(())) => None,
         (None, Err(e)) => Some(format!("hook: guidance not delivered: {e}")),
     };
-    if written.is_err() {
-        if let Some(mark) = &outcome.claimed {
-            let _ = fs::remove_file(mark); // the log line below says why
-        }
-    }
+    let kept = match (&written, &outcome.claimed) {
+        (Err(_), Some(mark)) => match fs::remove_file(mark) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Some(e),
+            Ok(()) | Err(_) => None,
+        },
+        _ => None,
+    };
+    let line = match (line, kept) {
+        (Some(line), Some(e)) => Some(format!("{line} (marker kept: {e})")),
+        (line, _) => line,
+    };
     if let Some(line) = line {
         log_line(state, &line);
     }
@@ -477,11 +483,11 @@ pub(crate) fn log_line(state: &Path, line: &str) {
     let day = stamp.get(..10).unwrap_or("undated");
     let written = fs::create_dir_all(&dir).and_then(|()| {
         crate::log::prune(&dir, now);
-        let mut f = File::options()
+        let mut log_file = File::options()
             .create(true)
             .append(true)
             .open(dir.join(format!("{day}.log")))?;
-        writeln!(f, "{stamp} {}", line.replace('\n', " | "))
+        writeln!(log_file, "{stamp} {}", line.replace('\n', " | "))
     });
     drop(written); // nowhere left to report a log that cannot be written
 }

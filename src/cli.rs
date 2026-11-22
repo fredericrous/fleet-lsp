@@ -245,17 +245,19 @@ mod tests {
 
     #[test]
     fn hook_takes_one_known_event() {
-        let p = |a: &[&str]| parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let parse_words = |a: &[&str]| parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         assert_eq!(
-            p(&["hook", "post-tool-use"]),
+            parse_words(&["hook", "post-tool-use"]),
             Ok(Command::Hook(crate::hook::Event::PostToolUse))
         );
-        assert!(matches!(p(&["hook", "bogus"]), Err(Usage(m)) if m.contains("unknown event")));
-        assert!(p(&["hook"]).is_err());
         assert!(
-            matches!(p(&["hook", "--version"]), Err(Usage(m)) if m == "hook: unexpected --version")
+            matches!(parse_words(&["hook", "bogus"]), Err(Usage(m)) if m.contains("unknown event"))
         );
-        assert!(p(&["hook", "session-start", "extra"]).is_err());
+        assert!(parse_words(&["hook"]).is_err());
+        assert!(
+            matches!(parse_words(&["hook", "--version"]), Err(Usage(m)) if m == "hook: unexpected --version")
+        );
+        assert!(parse_words(&["hook", "session-start", "extra"]).is_err());
     }
 
     #[test]

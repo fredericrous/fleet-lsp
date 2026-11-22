@@ -97,7 +97,7 @@ pub(crate) fn members(b: &[u8], i: usize) -> Option<Vec<(Range<usize>, Range<usi
     }
 }
 
-/// The value_span span of member `name` among `members`, matching the decoded key
+/// The value span of member `name` among `members`, matching the decoded key
 /// (two spellings of one key are one key).
 pub(crate) fn member(
     b: &[u8],
@@ -121,9 +121,9 @@ pub(crate) fn elements(b: &[u8], i: usize) -> Option<Vec<Range<usize>>> {
         return Some(out);
     }
     loop {
-        let e = j..value_end(b, j)?;
-        out.push(e.clone());
-        j = ws(b, e.end);
+        let element = j..value_end(b, j)?;
+        out.push(element.clone());
+        j = ws(b, element.end);
         match b.get(j)? {
             b',' => j = ws(b, j + 1),
             b']' => return Some(out),

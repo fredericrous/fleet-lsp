@@ -2202,8 +2202,11 @@ mod tests {
         cap_diagnostics(items, uri).map(|(arr, n)| (arr.as_arr().expect("an array").to_vec(), n))
     }
 
-    fn message(d: &Json) -> &str {
-        d.get("message").and_then(Json::as_str).unwrap_or("")
+    fn message(diagnostic: &Json) -> &str {
+        diagnostic
+            .get("message")
+            .and_then(Json::as_str)
+            .unwrap_or("")
     }
 
     /// FALSIFY: raise `DIAGNOSTICS_PER_FILE` past 50.
