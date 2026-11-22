@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 plan-id: p-01M7ZWPG42B1QJ5ZPDTZZSAVXC
 branch: feat/guidance-on-contact
 repos: [fleet-lsp]
@@ -99,7 +99,6 @@ Applied on both paths:
 - backend (opus): R1 4 findings (unbounded hook.log, `.` fallback, untested guards) fixed; deltas approve (81k/72 s, 38k/34 s, 30k/14 s, 22k/10 s).
 - lang:rust (opus): R1 6 (Forward/ToolAccess enums, Capped, expect) fixed; deltas approve (72k/48 s, 35k/29 s, 29k/9 s, 22k/9 s).
 - unix (opus): R1 3 (marker kept on lost write, `hook -x`) fixed; delta approve (55k/24 s, 35k/22 s); deliberate: `hook --help` already prints help (`asks_for_help` runs first).
-- Next: release 0.7.0 (plugin.json version + 4× `--min-version`, CHANGELOG, tap), install, then the live session check below; then `status: done`.
 
 ## Verification record
 - `make check` parts: fmt, clippy `-D warnings`, `cargo test` (all suites, run by the commit gate), `check-no-deps.sh`, `check-plugin.sh` → all pass. Falsified: dropping `post-tool-use` from hooks.json fails `check-plugin.sh`.
@@ -107,5 +106,6 @@ Applied on both paths:
 - `tests/relay.rs`: 50-item push → 21 with "(5 errors)"; 6,000 × 300 B push (≈2.4 MiB) → 21, frame < 70 KiB, next frame reads and is forwarded byte-identical; workspace push → 21; tsgo pull with 31 errors → 21 → pass. Overload test peak RSS 162 MiB (limit 202).
 - `src/hook.rs` + `tests/hook.rs` (hooks.json commands via `sh -c`, temp state): non-project start silent, repo start guides (≤ 6 lines); first `.rs` touch guides once, `.md` nothing, second touch nothing and no log line; compaction clears the marker; `agent_id` touch silent, no marker; 8 parallel first touches → 1 output; unsafe ids write nothing; non-JSON silent; agents by `name`, comma/flow/block lists, deny list, unsupported syntax → inject; plugin agent from its one install → pass.
 - Real binary, temp `XDG_STATE_HOME`, this machine's `~/.claude/agents`: start in `~/Developer/Perso` → 0 lines; in the fleet-lsp checkout → guidance; `post-tool-use` on `fleet-lsp/src/main.rs` → JSON, then nothing; `browser-check`, `plan-review-po` → nothing; `Explore`, `implementation-review`, `relais:relais-research` → JSON (1165 bytes); `hook bogus` → exit 2 → as expected.
+- After release and install (fleet-lsp 0.7.0, #40 + #41, tag `v0.7.0`; release run 45074776454: four platform archives, tap published and install-tested; `brew upgrade` and `claude plugin update` here → 0.7.0): a headless Claude Code session started in `~/Developer/Perso` (session ee630dfb) logged no SessionStart guidance, then on its Read of `fleet-lsp/src/main.rs` the hook log has `PostToolUse ee630dfb…: guided on …/fleet-lsp/src/main.rs`, once → as expected.
 
 <!-- panel: repos=fleet-lsp adds= reviewers=backend,lang:rust,tui,unix,codex body-sha=d8411fd59f74 -->
