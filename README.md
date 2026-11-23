@@ -61,16 +61,23 @@ Check a repository: `cd <repo> && fleet-lsp doctor`.
   `fleet-lsp: python: stale venv: pyright 1.1.414, pinned 1.1.411; fix: uv sync`.
 - **rust-analyzer that could not load the workspace** answers
   `rust-analyzer: workspace did not load: …` with a fix.
-- **A six-line note** (`fleet-lsp hook`, run by
-  [hooks/code-intelligence.sh](plugins/fleet-lsp/hooks/code-intelligence.sh))
-  tells the agent to navigate with the LSP tool, read only the range it
-  points to, and keep Grep for text. It loads only where it serves: at
-  session start when the session starts in a Rust, Go, Python or
-  TypeScript project; otherwise once, beside the first Read, Edit or Write
-  of such a file (a session started above several repositories gets it when
-  it first works on one). A subagent gets it when it starts, unless its
-  definition gives it no `LSP` tool. Decisions are logged to
-  `~/.local/state/fleet-lsp/hook/<date>.log`.
+- **A six-line note** tells the agent to navigate with the LSP tool, read
+  only the range it points to, and keep Grep for text. It loads only where
+  it serves:
+  - at session start, when the session starts in a Rust, Go, Python or
+    TypeScript project (`fleet-lsp hook`, run by
+    [hooks/code-intelligence.sh](plugins/fleet-lsp/hooks/code-intelligence.sh));
+  - otherwise once, beside the first Read, Edit or Write of such a file, so a
+    session started above several repositories gets it when it first works
+    on one. This is a mod ([hooks/register.ts](plugins/fleet-lsp/hooks/register.ts)),
+    run inside Claude Code: no process starts per tool call. It needs Claude
+    Code 2.1.330 or newer; an older one gives no first-contact note;
+  - to a subagent when it starts, unless its definition gives it no `LSP`
+    tool.
+
+  SessionStart and SubagentStart decisions are logged to
+  `~/.local/state/fleet-lsp/hook/<date>.log`; the first-contact note shows
+  only in the session transcript, beside that tool's result.
 - **Diagnostics are capped per file**: at most 20, and 64 KiB, errors
   before warnings, information and hints dropped. When more were dropped,
   one last diagnostic says how many and names the check that lists them

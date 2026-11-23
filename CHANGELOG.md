@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.7.1
+
+- The first-contact note no longer costs a process per tool call. In 0.7.0
+  every Read, Edit and Write started a shell and `fleet-lsp` (about 80-150 ms
+  on a loaded machine) for the whole session. The plugin now gives that note
+  from a mod run inside Claude Code: nothing starts per call, and the note
+  still arrives once, beside the first served file's result. SessionStart
+  and SubagentStart are unchanged (one process each).
+- Needs Claude Code 2.1.330 or newer for the first-contact note; an older
+  one still gets the session-start and subagent notes. The note no longer
+  appears in the hook log, only in the session transcript.
+- `fleet-lsp hook post-tool-use` stays for plugin copies older than 0.7.1.
+  Rolling back to 0.7.0: point the marketplace at `ref: v0.7.0`, update the
+  plugin, and put the 0.7.0 binary first on PATH. No state to migrate.
+
 ## v0.7.0
 
 - The session note loads only where it serves. At session start it loads when

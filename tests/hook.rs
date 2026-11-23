@@ -11,8 +11,18 @@ use std::time::Instant;
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-/// The `command` of `event` in hooks.json, unescaped.
+/// The PostToolUse command an older plugin copy (before 0.7.1) still runs:
+/// the plugin's own first-contact guidance is the in-process mod now, and the
+/// binary keeps the event for those copies.
+const OLD_POST_TOOL_USE: &str =
+    r#""${CLAUDE_PLUGIN_ROOT}/hooks/code-intelligence.sh" post-tool-use"#;
+
+/// The `command` of `event` in hooks.json, unescaped; PostToolUse is
+/// [`OLD_POST_TOOL_USE`].
 fn command(event: &str) -> String {
+    if event == "PostToolUse" {
+        return OLD_POST_TOOL_USE.to_string();
+    }
     let text =
         fs::read_to_string(Path::new(ROOT).join("plugins/fleet-lsp/hooks/hooks.json")).unwrap();
     let at = text
