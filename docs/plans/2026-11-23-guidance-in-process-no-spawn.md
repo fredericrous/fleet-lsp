@@ -91,5 +91,19 @@ Undocumented. In the worktree, a `hooks.json` with both, checked by `claude plug
 - After release and install: a headless session in `~/Developer/Perso` gets no start text, and the guidance once beside its first `.rs` Read (the transcript `context` row is the pass condition; the hook log's lack of `PostToolUse` lines is only a side note, since a mod that never ran leaves it empty too); `fleet-lsp --version` prints `fleet-lsp 0.7.1`.
 
 ## Decision log
+- 2026-11-23 — done by hand, not relais: 5–10 jobs were queued for 3 host slots; the mod API work needed the types already in this session.
+- 2026-11-23 — P0 answered: `hooks.json` holds `modules` and `hooks` together. `claude plugin validate` passes, and a headless session in a served repo ran the SessionStart command hook (hook log `SessionStart …: guided`) with the mod loaded.
+- 2026-11-23 — the PATH shim is reached only through the session's `env` (`--settings '{"env":{"PATH":…}}'`): Claude Code builds a hook's PATH itself, so a shim first on the caller's PATH counted nothing.
+- 2026-11-23 — the plugin-origin case (another plugin's `$.tool.call` Read) is not in `register.test.ts`: a test's `$.tool.call` is the engine's own (core origin), and the kit gives no way to raise one with a plugin origin. The guard rests on the types (`PluginTier` excludes `core`; origin is set by the host alone) and the canary.
+- 2026-11-23 — `register.test.ts` answers `$` calls beneath the plugin as `{ value: … }`; a compaction needs at least one kept message (with `toolUses`).
+
+## Verification record
+- `claude plugin validate plugins/fleet-lsp` → passed: hooks `tool.call{tool=Read|Edit|Write, file_path=?}`, `session.compact`; calls `$.env.get`, `$.fs.exists`, `$.session.id`, `$.state.get/set`; state `fleet-lsp.guided`.
+- `tsc` (TypeScript 5.9, the types header's tsconfig, hooks/ and types/ with this build's `claude-code.d.ts`) → exit 0. Run at `nice -n 19` outside the slot queue after a 1800 s wait freed no slot.
+- `claude plugin test plugins/fleet-lsp` → 9 pass: first served file guides once; `.md` never and keeps the note; subagent Read nothing; errored Read nothing then guides; SessionStart marker → nothing; precompute keeps, manual compaction brings it back; fresh marker after compaction → nothing; 3 parallel first Reads → 1; pattern accepts the 12 extensions and rejects 8 near misses. FALSIFY: dropping the `guided` check fails 2 tests.
+- `src/hook.rs` unit tests: the mod's `GUIDANCE_LINES` equal `GUIDANCE.lines()`; its `SERVED` pattern spells exactly `SERVED`. FALSIFY: one changed word in register.ts fails the first.
+- `tests/check_plugin.rs` → 4 pass: as-is passes; a PostToolUse entry, a missing module, a plugin.json version apart from Cargo.toml each exit 1 with only their own stderr line. `tests/hook.rs` → 7 pass (the `post-tool-use` path an older plugin copy runs).
+- Headless, worktree plugin via `--plugin-dir`, installed 0.7.0 off for the run: from `~/Developer/Perso`, 6 Reads (4 served) → the note arrived once, as the `tool.call` hook's context (session 1578824f); from the worktree, the session-start note was present (the model quoted it).
+- Cost: shim through the session env, 6 Reads (4 served, 2 not) → the binary started once, `hook session-start` (session 90b06d4e). 0.7.0 would have started a shell and the binary on each of the 6 calls as well.
 
 <!-- panel: repos=fleet-lsp adds=lang:typescript reviewers=backend,lang:rust,lang:typescript,tui,unix,codex body-sha=a3e48daefbb0 -->
