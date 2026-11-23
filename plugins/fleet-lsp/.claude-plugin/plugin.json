@@ -1,7 +1,8 @@
 {
   "name": "fleet-lsp",
   "version": "0.7.0",
-  "description": "Pinned, ready language servers: each server verified against the repository's pin, every query held until the server has loaded. Replaces the official gopls-lsp, rust-analyzer-lsp, typescript-lsp and pyright-lsp plugins; turn those off.",
+  "description": "Pinned, ready language servers: each server verified against the repository's pin, every query held until the server has loaded. Replaces the official gopls-lsp, rust-analyzer-lsp, typescript-lsp and pyright-lsp plugins; turn those off. Tested on Claude Code >= 2.1.330 (first-contact guidance is a mod).",
+  "types": "./types/index.d.ts",
   "author": {
     "name": "Frederic Rousseau"
   },

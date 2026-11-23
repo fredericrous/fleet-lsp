@@ -773,4 +773,52 @@ mod tests {
         let o = s.run(Event::SubagentStart, &subagent("absent:browser", &s.0));
         assert!(injects(&o, "SubagentStart"));
     }
+
+    /// The mod (`plugins/fleet-lsp/hooks/register.ts`) gives the first-contact
+    /// note itself: its single-quoted `GUIDANCE_LINES` must be this text, in
+    /// order. FALSIFY: change one word on either side.
+    #[test]
+    fn the_mod_gives_the_same_guidance() {
+        let module = include_str!("../plugins/fleet-lsp/hooks/register.ts");
+        let start = module
+            .find("const GUIDANCE_LINES = [")
+            .expect("register.ts declares GUIDANCE_LINES");
+        let end = start + module[start..].find("\n]").expect("its array closes");
+        let lines: Vec<&str> = module[start..end]
+            .lines()
+            .skip(1)
+            .map(|l| {
+                let quoted = l.trim().strip_suffix(',').unwrap_or(l.trim());
+                let inner = quoted
+                    .strip_prefix('\'')
+                    .and_then(|q| q.strip_suffix('\''))
+                    .unwrap_or_else(|| panic!("not one single-quoted line: {l}"));
+                assert!(
+                    !inner.contains(['\\', '\'']),
+                    "an escape this test does not read: {l}"
+                );
+                inner
+            })
+            .collect();
+        assert_eq!(lines, GUIDANCE.lines().collect::<Vec<_>>());
+    }
+
+    /// The mod's `SERVED` pattern names exactly these extensions (its own test
+    /// runs the pattern over them and over near misses).
+    #[test]
+    fn the_mod_serves_the_same_extensions() {
+        let module = include_str!("../plugins/fleet-lsp/hooks/register.ts");
+        let pattern = r"/\.(rs|go|pyi?|[jt]sx?|[mc][jt]s)$/";
+        assert!(
+            module.contains(&format!("export const SERVED = {pattern}")),
+            "register.ts SERVED is no longer {pattern}: update this list"
+        );
+        // That pattern, spelled out.
+        let mut spelled = vec!["rs", "go", "py", "pyi", "js", "jsx", "ts", "tsx"];
+        spelled.extend(["mjs", "mts", "cjs", "cts"]);
+        spelled.sort_unstable();
+        let mut served = SERVED.to_vec();
+        served.sort_unstable();
+        assert_eq!(spelled, served);
+    }
 }

@@ -106,9 +106,10 @@ serve   Speak LSP on stdin/stdout in front of the pinned server. Claude
         whose files it is asked about, one server each.
 hook    Print the code-intelligence guidance for a Claude Code hook whose
         JSON is on stdin, only where it serves: a session in a project of a
-        served language, its first touch of such a file, a subagent that
-        has the LSP tool. Claude Code runs it from the plugin; a person
-        never does.
+        served language, a subagent that has the LSP tool. Claude Code runs
+        it from the plugin; a person never does. The plugin gives the first
+        touch of a served file its guidance in process (a mod); post-tool-use
+        is kept for plugin copies older than 0.7.1.
 
 Exit codes:
   doctor  0 every language verified
