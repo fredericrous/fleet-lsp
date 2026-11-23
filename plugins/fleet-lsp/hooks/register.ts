@@ -22,11 +22,26 @@ const GUIDANCE_LINES = [
 export const GUIDANCE = GUIDANCE_LINES.join('\n') + '\n'
 
 // The extensions plugin.json's lspServers serve (`hook::SERVED` in
-// src/hook.rs; a unit test there checks this pattern against that list).
+// src/hook.rs). Its unit test `the_mod_serves_the_same_extensions` holds this
+// literal and the list it spells: change all three together.
 export const SERVED = /\.(rs|go|pyi?|[jt]sx?|[mc][jt]s)$/
 
 // A session id the binary would use in a marker path (`hook::marker`).
 const SESSION_ID = /^[A-Za-z0-9._-]+$/
+
+// Where the binary's SessionStart leaves its marker for session `id` (the
+// state directory as `log::state_dir()` picks it: an absolute XDG_STATE_HOME,
+// else HOME's), or undefined when it would leave none.
+export function markerPath(
+  id: string,
+  xdg: string | undefined,
+  home: string | undefined,
+): string | undefined {
+  if (!SESSION_ID.test(id) || id === '.' || id === '..') return undefined
+  if (xdg?.startsWith('/')) return `${xdg}/fleet-lsp/guided/${id}`
+  if (home?.startsWith('/')) return `${home}/.local/state/fleet-lsp/guided/${id}`
+  return undefined
+}
 
 const GUIDED = { plugin: 'fleet-lsp', key: 'guided' } as const
 
@@ -41,7 +56,12 @@ export const register: Register = on => {
     if (held.value === true) return done
     // The binary's SessionStart gave the note when the session started in a
     // served project, and left this marker.
-    if (await sessionStartGuided()) {
+    const marker = markerPath(
+      await $.session.id(),
+      await $.env.get('XDG_STATE_HOME'),
+      await $.env.get('HOME'),
+    )
+    if (marker !== undefined && (await $.fs.exists(marker))) {
       await $.state.set(GUIDED, true, { ifVersion: held.version })
       return done
     }
@@ -49,29 +69,18 @@ export const register: Register = on => {
     const claim = await $.state.set(GUIDED, true, { ifVersion: held.version })
     if (!claim.isSet) return done
     return { ...done, context: [...(done.context ?? []), GUIDANCE] }
-
-    async function sessionStartGuided(): Promise<boolean> {
-      const id = await $.session.id()
-      if (!SESSION_ID.test(id) || id === '.' || id === '..') return false
-      const xdg = await $.env.get('XDG_STATE_HOME')
-      const home = await $.env.get('HOME')
-      const base = xdg?.startsWith('/')
-        ? xdg
-        : home?.startsWith('/')
-          ? `${home}/.local/state`
-          : undefined
-      if (base === undefined) return false
-      return $.fs.exists(`${base}/fleet-lsp/guided/${id}`)
-    }
   })
 
   // A compaction drops the earlier copy of the note: the next served file
   // brings it again. A precompute installs nothing, and a skipped one keeps
-  // the conversation as it was.
+  // the conversation as it was. The reset is read before the compaction and
+  // loses to a claim made while it ran: that claim's note is in the new
+  // conversation.
   on('session.compact', async ($, e, next) => {
+    const before = await $.state.get(GUIDED)
     const compacted = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && !('skip' in compacted)) {
-      await $.state.set(GUIDED, false)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && compacted.skip === undefined) {
+      await $.state.set(GUIDED, false, { ifVersion: before.version })
     }
     return compacted
   })

@@ -107,9 +107,9 @@ serve   Speak LSP on stdin/stdout in front of the pinned server. Claude
 hook    Print the code-intelligence guidance for a Claude Code hook whose
         JSON is on stdin, only where it serves: a session in a project of a
         served language, a subagent that has the LSP tool. Claude Code runs
-        it from the plugin; a person never does. The plugin gives the first
-        touch of a served file its guidance in process (a mod); post-tool-use
-        is kept for plugin copies older than 0.7.1.
+        it from the plugin; a person never does. The plugin itself adds the
+        guidance beside the first served file a session touches; the
+        post-tool-use event is kept for plugin copies older than 0.7.1.
 
 Exit codes:
   doctor  0 every language verified
@@ -242,6 +242,26 @@ mod tests {
 
     fn p(a: &[&str]) -> Result<Command, Usage> {
         parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn help_says_why_post_tool_use_stays() {
+        let hook = HELP
+            .split("\nhook    ")
+            .nth(1)
+            .expect("HELP has a hook paragraph");
+        let paragraph: String = hook
+            .split("\n\n")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            paragraph
+                .contains("the post-tool-use event is kept for plugin copies older than 0.7.1"),
+            "{paragraph}"
+        );
     }
 
     #[test]

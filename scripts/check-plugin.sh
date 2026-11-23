@@ -29,10 +29,14 @@ for e in session-start subagent-start; do
 	n=$(grep -cF 'hooks/code-intelligence.sh\" '"$e"'"' "$j" || true)
 	[ "$n" = 1 ] || { echo "hooks.json runs $h $e $n times, want 1" >&2; fail=1; }
 done
-! grep -q '"PostToolUse"' "$j" || { echo "hooks.json has a PostToolUse command: first contact is the mod's" >&2; fail=1; }
-m=$(sed -n 's/.*"modules": *\[ *"\.\/\([^"]*\)".*/\1/p' "$j")
-[ -z "$m" ] && m=$(tr -d '\n' <"$j" | sed -n 's/.*"modules": *\[ *"\.\/\([^"]*\)".*/\1/p')
-[ -n "$m" ] && [ -f "plugins/fleet-lsp/hooks/$m" ] || { echo "hooks.json modules names no file under plugins/fleet-lsp/hooks: '$m'" >&2; fail=1; }
+! grep -q '"PostToolUse"' "$j" || { echo "hooks.json has a PostToolUse hook; remove it: hooks/register.ts gives the first-contact note" >&2; fail=1; }
+# The first `modules` entry, "./" optional, on one line or several.
+m=$(tr -d '\n' <"$j" | sed -n 's/.*"modules":[[:space:]]*\[[[:space:]]*"\(\.\/\)\{0,1\}\([^"]*\)".*/\2/p')
+if [ -z "$m" ]; then
+	echo 'hooks.json names no module: add "modules": ["./register.ts"]' >&2; fail=1
+elif [ ! -f "plugins/fleet-lsp/hooks/$m" ]; then
+	echo "hooks.json modules names $m, which is not in plugins/fleet-lsp/hooks" >&2; fail=1
+fi
 # A binary older than `hook` (it exits 2), and none at all: silent, exit 0.
 stub=$(mktemp -d) && printf '#!/bin/sh\necho usage >&2\nexit 2\n' >"$stub/fleet-lsp" && chmod +x "$stub/fleet-lsp"
 o=$(echo '{}' | PATH="$stub:$PATH" "$h" post-tool-use) && [ -z "$o" ] || { echo "$h is not silent with an old binary" >&2; fail=1; }

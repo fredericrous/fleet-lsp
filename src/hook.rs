@@ -788,7 +788,8 @@ mod tests {
             .lines()
             .skip(1)
             .map(|line| {
-                let quoted = line.trim().strip_suffix(',').unwrap_or(line.trim());
+                let trimmed = line.trim();
+                let quoted = trimmed.strip_suffix(',').unwrap_or(trimmed);
                 let inner = quoted
                     .strip_prefix('\'')
                     .and_then(|rest| rest.strip_suffix('\''))
@@ -804,7 +805,8 @@ mod tests {
     }
 
     /// The mod's `SERVED` pattern names exactly these extensions (its own test
-    /// runs the pattern over them and over near misses).
+    /// runs the pattern over them and over near misses). `pattern` and
+    /// `spelled` change together, with register.ts's literal.
     #[test]
     fn the_mod_serves_the_same_extensions() {
         let module = include_str!("../plugins/fleet-lsp/hooks/register.ts");

@@ -1,6 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { GUIDANCE, SERVED } from './register'
+import { GUIDANCE, markerPath, SERVED } from './register'
 
 // What the tools answer beneath the plugin, and where the marker would be.
 // `marker` is the path the binary's SessionStart would have written.
@@ -92,4 +92,11 @@ test('the pattern serves exactly the plugin extensions', () => {
   for (const name of ['x.mtsx', 'x.cjsx', 'x.rsx', 'x.json', 'x.pyc', 'x.tsbuildinfo', 'x.md', 'x.rs.bak']) {
     expect(SERVED.test(name)).toBe(false)
   }
+})
+
+test('the marker path follows the binary: absolute XDG, else HOME, safe ids only', () => {
+  expect(markerPath('s1', '/x', '/h')).toBe('/x/fleet-lsp/guided/s1')
+  expect(markerPath('s1', 'rel', '/h')).toBe('/h/.local/state/fleet-lsp/guided/s1')
+  expect(markerPath('s1', undefined, undefined)).toBeUndefined()
+  for (const id of ['', '.', '..', 'a/b', '../x']) expect(markerPath(id, '/x', '/h')).toBeUndefined()
 })
