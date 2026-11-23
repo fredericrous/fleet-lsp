@@ -6,7 +6,8 @@ import { GUIDANCE, markerPath, SERVED } from './register'
 // `marker` is the path the binary's SessionStart would have written.
 const KEPT = [{ role: 'user', text: 'kept', toolUses: [] }]
 
-type World = { marker?: string; erroredRead?: boolean }
+// `compacting`, when set, holds a compaction open until it resolves.
+type World = { marker?: string; erroredRead?: boolean; compacting?: Promise<void> }
 
 function world(on: On, state: World = {}) {
   on('tool.call', () =>
@@ -17,7 +18,10 @@ function world(on: On, state: World = {}) {
   on('session.id', () => ({ value: 's1' }))
   on('env.get', (_, e) => ({ value: e.name === 'XDG_STATE_HOME' ? '/state' : undefined }))
   on('fs.exists', (_, e) => ({ value: e.path === state.marker }))
-  on('session.compact', () => ({ messages: KEPT }) as never)
+  on('session.compact', async () => {
+    await state.compacting
+    return { messages: KEPT } as never
+  })
 }
 
 const read = (file_path: string, extra: Record<string, unknown> = {}) =>
@@ -99,4 +103,16 @@ test('the marker path follows the binary: absolute XDG, else HOME, safe ids only
   expect(markerPath('s1', 'rel', '/h')).toBe('/h/.local/state/fleet-lsp/guided/s1')
   expect(markerPath('s1', undefined, undefined)).toBeUndefined()
   for (const id of ['', '.', '..', 'a/b', '../x']) expect(markerPath(id, '/x', '/h')).toBeUndefined()
+})
+
+// FALSIFY: reset `guided` without `ifVersion` in the compact hook.
+test('a note claimed while a compaction runs survives it', async ($, on) => {
+  let release = () => {}
+  const tools: World = { compacting: new Promise<void>(done => (release = done)) }
+  world(on, tools)
+  const compaction = $.session.compact({ trigger: 'manual', messages: KEPT } as never)
+  expect(guided(await $.tool.call(read('/x/a.rs')))).toBe(1)
+  release()
+  await compaction
+  expect(guided(await $.tool.call(read('/x/b.rs')))).toBe(0)
 })
