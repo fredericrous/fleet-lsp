@@ -1,5 +1,5 @@
 ---
-status: active
+status: done
 plan-id: p-01M830BR59896ZBW1G44MMJ4HM
 branch: feat/guidance-mod
 repos: [fleet-lsp]
@@ -102,7 +102,6 @@ Undocumented. In the worktree, a `hooks.json` with both, checked by `claude plug
 - backend (opus): R1 3 (CAS proof, compaction-reset race, no mod log); CAS falsified, reset race fixed with a test; deliberate: no log line (canary). Deltas approve.
 - lang:typescript, lang:rust, tui (opus): R1 approve-with-changes, all fixed; deliberate: `as never` in test replies (kit types not public), `FleetLspGuided` export (a contract needs one). Delta approve.
 - unix (opus): approve (regex tolerance fixed anyway).
-- Next: merge, tag v0.7.1, brew upgrade + plugin update, then the post-release canary; then `status: done`.
 
 ## Verification record
 - `claude plugin validate plugins/fleet-lsp` → passed: hooks `tool.call{tool=Read|Edit|Write, file_path=?}`, `session.compact`; calls `$.env.get`, `$.fs.exists`, `$.session.id`, `$.state.get/set`; state `fleet-lsp.guided`.
@@ -112,5 +111,7 @@ Undocumented. In the worktree, a `hooks.json` with both, checked by `claude plug
 - `tests/check_plugin.rs` → 4 pass: as-is passes; a PostToolUse entry, a missing module, a plugin.json version apart from Cargo.toml each exit 1 with only their own stderr line. `tests/hook.rs` → 7 pass (the `post-tool-use` path an older plugin copy runs).
 - Headless, worktree plugin via `--plugin-dir`, installed 0.7.0 off for the run: from `~/Developer/Perso`, 6 Reads (4 served) → the note arrived once, as the `tool.call` hook's context (session 1578824f); from the worktree, the session-start note was present (the model quoted it).
 - Cost: shim through the session env, 6 Reads (4 served, 2 not) → the binary started once, `hook session-start` (session 90b06d4e). 0.7.0 would have started a shell and the binary on each of the 6 calls as well.
+
+- After release (#43, tag `v0.7.1`, release run 45193878855: four archives, tap published and install-tested; `brew upgrade` → `fleet-lsp 0.7.1`, `claude plugin update` → 0.7.1): canary, a headless session in `~/Developer/Perso` with the installed plugin (session c53d9a99), 6 Reads → one note, right after the first served file (`src/main.rs`; `README.md` before it got none); the shim through the session env counted one binary start, `hook session-start` → as expected.
 
 <!-- panel: repos=fleet-lsp adds=lang:typescript reviewers=backend,lang:rust,lang:typescript,tui,unix,codex body-sha=a3e48daefbb0 -->
