@@ -8,15 +8,15 @@ const KEPT = [{ role: 'user', text: 'kept', toolUses: [] }]
 
 type World = { marker?: string; erroredRead?: boolean }
 
-function world(on: On, w: World = {}) {
+function world(on: On, state: World = {}) {
   on('tool.call', () =>
-    w.erroredRead === true
+    state.erroredRead === true
       ? ({ result: 'boom', isError: true } as never)
       : ({ result: 'ok' } as never),
   )
   on('session.id', () => ({ value: 's1' }))
   on('env.get', (_, e) => ({ value: e.name === 'XDG_STATE_HOME' ? '/state' : undefined }))
-  on('fs.exists', (_, e) => ({ value: e.path === w.marker }))
+  on('fs.exists', (_, e) => ({ value: e.path === state.marker }))
   on('session.compact', () => ({ messages: KEPT }) as never)
 }
 
@@ -45,10 +45,10 @@ test("a subagent's Read gives nothing and leaves the main session's note", async
 })
 
 test('an errored Read gives nothing and keeps the note for the next', async ($, on) => {
-  const w: World = { erroredRead: true }
-  world(on, w)
+  const tools: World = { erroredRead: true }
+  world(on, tools)
   expect(guided(await $.tool.call(read('/x/a.rs')))).toBe(0)
-  w.erroredRead = false
+  tools.erroredRead = false
   expect(guided(await $.tool.call(read('/x/a.rs')))).toBe(1)
 })
 
@@ -67,11 +67,11 @@ test('an applied compaction brings the note back; a precompute does not', async 
 })
 
 test('after a compaction, a fresh SessionStart marker still counts', async ($, on) => {
-  const w: World = {}
-  world(on, w)
+  const tools: World = {}
+  world(on, tools)
   expect(guided(await $.tool.call(read('/x/a.rs')))).toBe(1)
   await $.session.compact({ trigger: 'auto', messages: KEPT } as never)
-  w.marker = '/state/fleet-lsp/guided/s1'
+  tools.marker = '/state/fleet-lsp/guided/s1'
   expect(guided(await $.tool.call(read('/x/a.rs')))).toBe(0)
 })
 

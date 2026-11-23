@@ -29,10 +29,10 @@ impl Copy {
     }
 
     fn edit(&self, rel: &str, from: &str, to: &str) {
-        let p = self.0.join(rel);
-        let text = fs::read_to_string(&p).unwrap();
+        let path = self.0.join(rel);
+        let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains(from), "{rel} holds no {from:?}");
-        fs::write(&p, text.replacen(from, to, 1)).unwrap();
+        fs::write(&path, text.replacen(from, to, 1)).unwrap();
     }
 
     /// The script's exit code and its stderr lines.
@@ -69,17 +69,17 @@ const HOOKS: &str = "plugins/fleet-lsp/hooks/hooks.json";
 
 #[test]
 fn the_plugin_as_it_is_passes() {
-    let c = Copy::new("as-is");
-    assert_eq!(c.check(), (Some(0), Vec::new()));
+    let copy = Copy::new("as-is");
+    assert_eq!(copy.check(), (Some(0), Vec::new()));
 }
 
 /// FALSIFY: drop the PostToolUse check from check-plugin.sh.
 #[test]
 fn a_posttooluse_command_is_refused() {
-    let c = Copy::new("posttooluse");
-    c.edit(HOOKS, r#""hooks": {"#, r#""hooks": { "PostToolUse": [], "#);
+    let copy = Copy::new("posttooluse");
+    copy.edit(HOOKS, r#""hooks": {"#, r#""hooks": { "PostToolUse": [], "#);
     assert_eq!(
-        c.check(),
+        copy.check(),
         (
             Some(1),
             vec!["hooks.json has a PostToolUse command: first contact is the mod's".to_string()]
@@ -89,10 +89,10 @@ fn a_posttooluse_command_is_refused() {
 
 #[test]
 fn a_missing_module_is_refused() {
-    let c = Copy::new("module");
-    fs::remove_file(c.0.join("plugins/fleet-lsp/hooks/register.ts")).unwrap();
+    let copy = Copy::new("module");
+    fs::remove_file(copy.0.join("plugins/fleet-lsp/hooks/register.ts")).unwrap();
     assert_eq!(
-        c.check(),
+        copy.check(),
         (
             Some(1),
             vec![
@@ -105,16 +105,19 @@ fn a_missing_module_is_refused() {
 
 #[test]
 fn a_plugin_version_apart_from_the_binary_is_refused() {
-    let c = Copy::new("version");
+    let copy = Copy::new("version");
     let manifest = "plugins/fleet-lsp/.claude-plugin/plugin.json";
-    let v = env!("CARGO_PKG_VERSION");
-    c.edit(
+    let version = env!("CARGO_PKG_VERSION");
+    copy.edit(
         manifest,
-        &format!("\"version\": \"{v}\""),
+        &format!("\"version\": \"{version}\""),
         "\"version\": \"9.9.9\"",
     );
     assert_eq!(
-        c.check(),
-        (Some(1), vec![format!("plugin.json version is not {v}")])
+        copy.check(),
+        (
+            Some(1),
+            vec![format!("plugin.json version is not {version}")]
+        )
     );
 }

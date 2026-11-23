@@ -787,15 +787,15 @@ mod tests {
         let lines: Vec<&str> = module[start..end]
             .lines()
             .skip(1)
-            .map(|l| {
-                let quoted = l.trim().strip_suffix(',').unwrap_or(l.trim());
+            .map(|line| {
+                let quoted = line.trim().strip_suffix(',').unwrap_or(line.trim());
                 let inner = quoted
                     .strip_prefix('\'')
-                    .and_then(|q| q.strip_suffix('\''))
-                    .unwrap_or_else(|| panic!("not one single-quoted line: {l}"));
+                    .and_then(|rest| rest.strip_suffix('\''))
+                    .unwrap_or_else(|| panic!("not one single-quoted line: {line}"));
                 assert!(
                     !inner.contains(['\\', '\'']),
-                    "an escape this test does not read: {l}"
+                    "an escape this test does not read: {line}"
                 );
                 inner
             })
