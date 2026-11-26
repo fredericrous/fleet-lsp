@@ -196,7 +196,7 @@ jobs:
           fi
 
   # The tap formula, from the PUBLISHED checksums. The deploy key is this
-  # repository's own (not aval's), held by the `release` environment, which
+  # repository's own (not greentopo's), held by the `release` environment, which
   # only `v*` tags may use.
   publish-tap:
     name: publish to the homebrew tap

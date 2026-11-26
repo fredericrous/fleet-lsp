@@ -33,7 +33,7 @@ missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 
 [lints.clippy]
-# The aval subset: real defects, not style. `unwrap_used`/`expect_used` are
+# The greentopo subset: real defects, not style. `unwrap_used`/`expect_used` are
 # absent on purpose — the tests use them by design and CI runs `-D warnings`.
 todo = "deny"
 unimplemented = "deny"
