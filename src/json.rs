@@ -1,6 +1,6 @@
 //! A small JSON reader and writer.
 //!
-//! Copied from aval-core (`crates/aval-core/src/json.rs` at aval 9214398),
+//! Copied from aval-core (`crates/aval-core/src/json.rs` at aval 9214398, now greentopo),
 //! owned here rather than depended on (change.dependency-bar). fleet-lsp
 //! relays frames byte for byte; this module is used only where a whole value
 //! is needed — the `initialize` it re-serialises, the small status/progress
@@ -11,7 +11,7 @@
 //! rewrites `1.0` as `1`.
 //!
 //! The reader is **strict**, because it also parses JSON-RPC traffic for
-//! `aval mcp` and that arrives from software nobody here wrote. It rejects what
+//! `greentopo mcp` and that arrives from software nobody here wrote. It rejects what
 //! JSON rejects: an escape outside `" \ / b f n r t u`, an unescaped control
 //! character, and a surrogate that is not half of a well-formed pair. Numbers
 //! carry their integer value exactly (`Json::Int`) so a request id survives the
