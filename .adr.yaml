@@ -17,7 +17,7 @@ packs:
 scopes: []
 keys:
 
-# Which parts of this repository have which traits (aval 1.7, SEMANTICS
+# Which parts of this repository have which traits (greentopo, SEMANTICS
 # section 2.5), as `greentopo traits --detect` proposed and a reviewer accepted.
 # Rules about a trait not named here are left out of the session hook and
 # counted; `greentopo rules --all-traits` lists them. `greentopo traits --check`, run
